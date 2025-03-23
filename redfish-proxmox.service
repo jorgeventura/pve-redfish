@@ -1,0 +1,12 @@
+[Unit]
+Description=Redfish Daemon for Proxmox VM Control
+After=network.target
+
+[Service]
+ExecStart=/opt/redfish_daemon/venv/bin/python /opt/redfish_daemon/redfish-proxmox.py
+WorkingDirectory=/opt/redfish_daemon
+Restart=always
+Type=simple
+
+[Install]
+WantedBy=multi-user.target
