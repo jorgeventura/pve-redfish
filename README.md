@@ -64,18 +64,19 @@ The following functions are implemented:
   curl -k -X POST -H "X-Auth-Token: some-token" -d '{"ResetType": "ForceStop"}' https://pve-node/redfish/v1/Systems/<vm_id>/Actions/ComputerSystem.Reset
 
   ```
-### 7. Virtual CD
-  - **mount cd:**
-    - **redfish endpoint:** /redfish/v1/Systems/<vm_id>/Actions/ComputerSystem.MountISO
-    - **Post request**: '{"Action": "Mount", "ISOPath": "debian-12.8.0-amd64-netinst.iso"}'
+### 7. Virtual Media
+  - **mount virtual media:**
+    - **redfish endpoint:** /redfish/v1/Systems/<vm_id>/VirtualMedia/CDROM/Actions/VirtualMedia.InsertMedia
+    - **Post request**: '{"Image": "zfs-images:iso/debian-12.8.0-amd64-netinst.iso"}'
+
     ```bash
-    curl -k -X POST -H "X-Auth-Token: some-token" https://pve-node/redfish/v1/Systems/<vm_id>/Actions/ComputerSystem.MountISO -d '{"Action": "Mount", "ISOPath": "zfs-images:iso/debian-12.8.0-amd64-netinst.iso"}'
+    curl -k -X POST -H "X-Auth-Token: some-token" https://pve-node/redfish/v1/Systems/<vm_id>VirtualMedia/CDROM/Actions/VirtualMedia.InsertMedia -d '{"Image": "zfs-images:iso/debian-12.8.0-amd64-netinst.iso"}'
     ```
-  - **eject cd:**
-    - **redfish endpoint:** /redfish/v1/Systems/<vm_id>/Actions/ComputerSystem.MountISO
-    - **Post request**: '{"Action": "Eject"}'
+  - **eject media:**
+    - **redfish endpoint:** /redfish/v1/Systems/<vm_id>/VirtualMedia/CDROM/Actions/VirtualMedia.EjectMedia
+    - **Post request**: None
     ```bash
-    curl -k -X POST -H "X-Auth-Token: some-token" https://pve-node/redfish/v1/Systems/<vm_id>/Actions/ComputerSystem.MountISO -d '{"Action": "Eject"}'
+    curl -k -X POST -H "X-Auth-Token: some-token" https://pve-node/redfish/v1/Systems/<vm_id>/VirtualMedia/CDROM/Actions/VirtualMedia.EjectMedia
     ```
 ### 8. Get vm status
   - **redfish endpoint:** /redfish/v1/Systems/<vm_id>
@@ -99,6 +100,33 @@ The following functions are implemented:
   ```bash
   curl -k -X GET -H "X-Auth-Token: some-token" https://pve-node/redfish/v1/Systemd
   ```
+### 12 Boot Management (PATCH)
+  - **redfish endpoint:** https://pve-m5/redfish/v1/Systems/101
+  - **data request:** '{"Boot": {"BootSourceOverrideTarget": "Hdd", "BootSourceOverrideEnabled": "Once"}}'
+  - **BootSourceOverrideTarget:** "Pxe" | "Cd" | "Hdd"
+  - **BootSourceOverrideEnabled:** "Once" | "Continuous" | "Disabled"
+
+  For boot from HD:
+
+  ```bash
+  curl -k -X PATCH -H "Content-Type: application/json" -H "X-Auth-Token: cac09af04a2b9d338a0616110fb78a1d" \
+    -d '{"Boot": {"BootSourceOverrideTarget": "Hdd", "BootSourceOverrideEnabled": "Once"}}' \
+    https://pve-m5/redfish/v1/Systems/101
+  ```
+  For boot from PXE:
+  ```bash
+  curl -k -X PATCH -H "Content-Type: application/json" -H "X-Auth-Token: cac09af04a2b9d338a0616110fb78a1d" \
+    -d '{"Boot": {"BootSourceOverrideTarget": "Pxe", "BootSourceOverrideEnabled": "Once"}}' \
+    https://pve-m5/redfish/v1/Systems/101
+  ```
+  For boot from CD:
+  ```bash
+  curl -k -X PATCH -H "Content-Type: application/json" -H "X-Auth-Token: cac09af04a2b9d338a0616110fb78a1d" \
+    -d '{"Boot": {"BootSourceOverrideTarget": "Cd", "BootSourceOverrideEnabled": "Once"}}' \
+    https://pve-m5/redfish/v1/Systems/101
+  ```
+
+
 
 
 # Installation
@@ -145,6 +173,78 @@ sudo systemctl status redfish-proxmox.service
 ```
 
 
+3. Ensure openssl is Installed
+
+Check if openssl is available:
+
+bash
+
+```bash
+openssl version
+```
+
+If it’s not installed, install it:
+
+bash
+
+```bash
+apt update
+apt install openssl
+```
+
+4. Generate the Certificate and Key
+
+Run this command to create a private key and self-signed certificate in one go:
+
+bash
+
+```bash
+openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes
+```
+
+-   \-x509: Creates a self-signed certificate.
+    
+-   \-newkey rsa:2048: Generates a 2048-bit RSA key.
+    
+-   \-keyout key.pem: Outputs the private key to key.pem.
+    
+-   \-out cert.pem: Outputs the certificate to cert.pem.
+    
+-   \-days 365: Valid for 1 year (adjust as needed).
+    
+-   \-nodes: Skips passphrase protection (simpler for testing).
+    
+
+You’ll be prompted to enter some details (e.g., country, organization). For a test cert, you can press Enter to leave them blank or fill in minimal info:
+
+```text
+Country Name (2 letter code) [AU]: 
+State or Province Name (full name) [Some-State]: 
+Locality Name (eg, city) []: 
+Organization Name (eg, company) [Internet Widgits Pty Ltd]: 
+Organizational Unit Name (eg, section) []: 
+Common Name (e.g. server FQDN or YOUR name) []: pve-m5
+Email Address []: 
+```
+
+-   Set Common Name to pve-m5 (your hostname) to match your server.
+    
+
+This creates two files: key.pem (private key) and cert.pem (certificate).
+
+5. Move Files to Your Daemon Directory
+
+For convenience, move them to /opt/redfish\_daemon:
+
+bash
+
+```bash
+mv cert.pem /opt/redfish_daemon/
+mv key.pem  opt/redfish_daemon/
+cd /opt/redfish_daemon
+```
+
+
 # Implemented Endpoints in the Program
 
 The code covers the following Redfish endpoints and functionalities:
@@ -164,5 +264,120 @@ The code covers the following Redfish endpoints and functionalities:
 7.  **Update Config Action (/redfish/v1/Systems/{vm\_id}/Actions/ComputerSystem.UpdateConfig)**:
     -   Custom action to update VM configuration.
 8.  **Session Service (/redfish/v1/SessionService/Sessions)**:
-    -   Implements session-based authentication.
+    -   Implements session-based authentication when AUTH == "Session".
 
+### Redfish Endpoints Not Included
+
+The Redfish specification defines a broad set of resources and endpoints for managing physical hardware, many of which don’t directly apply to Proxmox’s virtualized environment or were not implemented in the program.
+
+#### 1\. **Chassis (/redfish/v1/Chassis)**
+
+-   **Description**: Represents physical enclosures or hardware chassis (e.g., server racks, blades).
+-   **Why Missing**: Proxmox manages VMs, not physical hardware. There’s no direct equivalent to a chassis in a virtualized environment unless if mapped into the Proxmox node itself (e.g., PROXMOX\_NODE), but this isn’t implemented.
+-   **Potential Implementation**: Map the Proxmox node to a single Chassis resource, exposing node-level metrics (e.g., temperature, power), but this would require Proxmox API access to physical host data, which is limited.
+
+#### 2\. **Managers (/redfish/v1/Managers)**
+
+-   **Description**: Represents management controllers (e.g., BMCs like iLO or iDRAC) for remote management.
+-   **Why Missing**: Proxmox doesn’t expose a BMC-like interface for VMs. The daemon itself could be considered a "manager," but this isn’t modeled.
+-   **Potential Implementation**: Simulate a Managers endpoint representing the Proxmox server or the daemon, with details like network interfaces or firmware versions, but it’s not critical for VM control.
+
+#### 3\. **Power (/redfish/v1/Chassis/{chassis\_id}/Power)**
+
+-   **Description**: Provides detailed power metrics (e.g., voltage, wattage, power supplies).
+-   **Why Missing**: VMs don’t have physical power supplies or sensors; power states are abstracted (running, stopped, etc.).
+-   **Limitation**: Reset actions handle power control, but granular power metrics aren’t available in Proxmox’s VM API.
+
+#### 4\. **Thermal (/redfish/v1/Chassis/{chassis\_id}/Thermal)**
+
+-   **Description**: Reports temperature sensors, fans, and cooling systems.
+-   **Why Missing**: VMs lack physical sensors; thermal data applies to the host, not individual VMs.
+-   **Potential Implementation**: Host-level thermal data could be exposed if the Proxmox API provides it, but it’s not VM-specific.
+
+#### 5\. **Processors (/redfish/v1/Systems/{system\_id}/Processors)**
+
+-   **Description**: Details individual CPUs (e.g., model, clock speed, cache).
+-   **Why Missing**: ProcessorSummary in get\_vm\_status includes Count (cores) and Sockets, but detailed CPU info (e.g., vendor, frequency) isn’t exposed because Proxmox abstracts this for VMs.
+-   **Potential Implementation**: Limited by Proxmox; could hardcode QEMU-specific details, but they wouldn’t reflect runtime state.
+
+#### 6\. **Memory (/redfish/v1/Systems/{system\_id}/Memory)**
+
+-   **Description**: Lists individual memory modules (e.g., DIMMs, capacity, speed).
+-   **Why Missing**: MemorySummary provides total memory in GiB, but Proxmox doesn’t track virtual memory as separate modules.
+-   **Limitation**: Virtual memory is a single allocation, not physical DIMMs, so this endpoint isn’t fully applicable.
+
+#### 7\. **Storage (/redfish/v1/Systems/{system\_id}/Storage)**
+
+-   **Description**: Manages physical storage controllers, drives, and volumes.
+-   **Why Missing**: SimpleStorage includes a CDROM entry, but Proxmox VMs don’t expose detailed storage (e.g., virtual disks) in a Redfish-compatible way beyond basic config (ide2, etc.).
+-   **Potential Implementation**: Expand SimpleStorage to list virtual disks (e.g., scsi0, virtio0) from the VM config, but it’s not implemented.
+
+#### 8\. **Network Interfaces (/redfish/v1/Systems/{system\_id}/NetworkInterfaces)**
+
+-   **Description**: Details network adapters and their configuration.
+-   **Why Missing**: Proxmox VM config includes network devices (e.g., net0), but the daemon doesn’t expose them as Redfish resources.
+-   **Potential Implementation**: Parse netX config entries and map them to NetworkInterfaces with MAC addresses and link status.
+
+#### 9\. **Ethernet Interfaces (/redfish/v1/Managers/{manager\_id}/EthernetInterfaces)**
+
+-   **Description**: Network details for the management controller.
+-   **Why Missing**: No Managers endpoint exists, and VM network interfaces aren’t directly tied to the daemon’s network.
+-   **Potential Implementation**: Could represent the Proxmox host’s network, but it’s not VM-specific.
+
+#### 10\. **Event Service (/redfish/v1/EventService)**
+
+-   **Description**: Manages event subscriptions for notifications (e.g., alerts, logs).
+-   **Why Missing**: Not implemented; Proxmox doesn’t natively support Redfish-style eventing for VMs.
+-   **Potential Implementation**: Simulate by polling VM status changes and sending events, but this requires additional infrastructure.
+
+#### 11\. **Log Services (/redfish/v1/Systems/{system\_id}/LogServices)**
+
+-   **Description**: Provides access to system logs (e.g., SEL, audit logs).
+-   **Why Missing**: Proxmox logs are host-level or task-based, not VM-specific in a Redfish-compatible format.
+-   **Potential Implementation**: Map Proxmox task logs to a LogService, but it’s not straightforward.
+
+#### 12\. **BIOS (/redfish/v1/Systems/{system\_id}/Bios)**
+
+-   **Description**: Manages BIOS settings and firmware.
+-   **Why Missing**: VMs use QEMU/KVM emulation, not physical BIOS; settings are part of VM config, not a separate entity.
+-   **Potential Implementation**: Map VM boot options (e.g., boot config) to a Bios resource, but it’s limited.
+
+#### 13\. **Secure Boot (/redfish/v1/Systems/{system\_id}/SecureBoot)**
+
+-   **Description**: Controls Secure Boot settings.
+-   **Why Missing**: Not applicable to Proxmox VMs; Secure Boot is guest-OS dependent and not managed via Proxmox API.
+
+#### 14\. **Update Service (/redfish/v1/UpdateService)**
+
+-   **Description**: Manages firmware and software updates.
+-   **Why Missing**: Applies to physical hardware or host-level updates, not VMs.
+-   **Potential Implementation**: Could simulate for VM templates or QEMU updates, but it’s out of scope.
+
+#### 15\. **Task Service (/redfish/v1/TaskService)**
+
+-   **Description**: Tracks asynchronous tasks (e.g., power operations).
+-   **Why Missing**: Your daemon returns task IDs (e.g., in power\_on), but there’s no endpoint to query task status.
+-   **Potential Implementation**: Store task states in sessions and expose via TaskService.
+
+#### 16\. **Account Service (/redfish/v1/AccountService)**
+
+-   **Description**: Manages user accounts and roles.
+-   **Why Missing**: Authentication is handled via Proxmox credentials or tokens, not Redfish accounts.
+-   **Potential Implementation**: Integrate with Proxmox user management, but it’s redundant with your SessionService.
+
+### Summary of Key Omissions
+
+-   **Hardware-Centric Endpoints**: Chassis, Power, Thermal, Managers, Processors, Memory, Storage (beyond CDROM), NetworkInterfaces, EthernetInterfaces, BIOS, SecureBoot, UpdateService.
+    -   **Reason**: Proxmox VMs lack physical hardware equivalents.
+-   **Management Features**: EventService, LogServices, TaskService, AccountService.
+    -   **Reason**: Not implemented, though partially feasible with additional effort.
+-   **Granular VM Details**: Detailed CPU, memory, storage, and network info.
+    -   **Reason**: Limited by Proxmox API and abstraction.
+
+### Conclusion
+
+Your daemon focuses on VM lifecycle management (power, config, media) and aligns well with the Systems resource in Redfish, which is appropriate for Proxmox. Missing endpoints are either inapplicable (hardware-specific) or unimplemented (management features). If you want to expand coverage, consider:
+
+1.  Adding TaskService to track task progress.
+2.  Mapping virtual disks and networks to Storage and NetworkInterfaces.
+3.  Simulating Chassis or Managers for the Proxmox node.
