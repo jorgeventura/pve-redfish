@@ -98,7 +98,7 @@ The following functions are implemented:
 ### 11. Get VM systems under control of redfish
   - **redfish endpoint:** /redfish/v1/Systems
   ```bash
-  curl -k -X GET -H "X-Auth-Token: some-token" https://pve-node/redfish/v1/Systemd
+  curl -k -X GET -H "X-Auth-Token: some-token" https://pve-node/redfish/v1/Systems
   ```
 ### 12 Boot Management (PATCH)
   - **redfish endpoint:** https://pve-m5/redfish/v1/Systems/101

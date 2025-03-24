@@ -15,7 +15,7 @@ import base64
 PROXMOX_HOST = "localhost"
 PROXMOX_USER = "user_with_access"       # Only required if using --Auth None
 PROXMOX_PASSWORD = "user_passwd"        # the same here
-PROXMOX_NODE = "pve-node"
+PROXMOX_NODE = "pve-m5"
 VERIFY_SSL = False
 
 # Options
@@ -373,6 +373,9 @@ def get_vm_status(proxmox, vm_id):
         elif "ide2" in boot_order and boot_order.index("ide2") < boot_order.index(";"):
             boot_target = "Cd"
 
+        # Determine BootSourceOverrideEnabled based on PowerState
+        boot_override_enabled = "Enabled" if redfish_status == "Off" else "Disabled"
+
         response = {
             "@odata.id": f"/redfish/v1/Systems/{vm_id}",
             "@odata.type": "#ComputerSystem.v1_13_0.ComputerSystem",
@@ -396,7 +399,7 @@ def get_vm_status(proxmox, vm_id):
                 "Devices": [{"Name": "CDROM", "Type": "CDROM", "CapacityBytes": 0, "Media": cdrom_media}]
             },
             "Boot": {
-                "BootSourceOverrideEnabled": "Disabled",  # Updated via PATCH
+                "BootSourceOverrideEnabled": boot_override_enabled,  # Dynamic value
                 "BootSourceOverrideTarget": boot_target,
                 "BootSourceOverrideSupported": ["Pxe", "Cd", "Hdd"]
             },
@@ -510,56 +513,56 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
             else:
                 proxmox = get_proxmox_api(self.headers)
 
-            # Handle payload parsing based on endpoint
-            # data = {}
-            if post_data:
-                try:
-                    data = json.loads(post_data.decode('utf-8'))
-                except json.JSONDecodeError:
-                    status_code = 400
-                    response = {"error": {"code": "Base.1.0.GeneralError", "message": "Invalid JSON payload"}}
-                    response_body = json.dumps(response).encode('utf-8')
-                    self.send_response(status_code)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(response_body)))
-                    self.send_header("Connection", "close")
-                    self.end_headers()
-                    self.wfile.write(response_body)
-                    return
-
-                data = json.loads(post_data.decode('utf-8'))
-                if path.startswith("/redfish/v1/Systems/") and "/Actions/ComputerSystem.Reset" in path:
-                    vm_id = path.split("/")[4]
-                    reset_type = data.get("ResetType", "")
-                    if reset_type == "On":
-                        response, status_code = power_on(proxmox, int(vm_id))
-                    elif reset_type == "ForceOff":
-                        response, status_code = power_off(proxmox, int(vm_id))
-                    elif reset_type == "ForceRestart":
-                        response, status_code = reboot(proxmox, int(vm_id))
-                    elif reset_type == "Pause":
-                        response, status_code = suspend_vm(proxmox, int(vm_id))
-                    elif reset_type == "Resume":
-                        response, status_code = resume_vm(proxmox, int(vm_id))
-                    elif reset_type == "ForceStop":
-                        response, status_code = stop_vm(proxmox, int(vm_id))
-                    else:
+                # Handle payload parsing based on endpoint
+                # data = {}
+                if post_data:
+                    try:
+                        data = json.loads(post_data.decode('utf-8'))
+                    except json.JSONDecodeError:
                         status_code = 400
-                        response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Unsupported ResetType: {reset_type}"}}
-                elif path.startswith("/redfish/v1/Systems/") and "/VirtualMedia/CDROM/Actions/VirtualMedia.InsertMedia" in path:
-                    vm_id = path.split("/")[4]
-                    iso_path = data.get("Image")
-                    response, status_code = manage_virtual_media(proxmox, int(vm_id), "InsertMedia", iso_path)
-                elif path.startswith("/redfish/v1/Systems/") and "/VirtualMedia/CDROM/Actions/VirtualMedia.EjectMedia" in path:
-                    vm_id = path.split("/")[4]
-                    response, status_code = manage_virtual_media(proxmox, int(vm_id), "EjectMedia")
-                elif path.startswith("/redfish/v1/Systems/") and "/Actions/ComputerSystem.UpdateConfig" in path:
-                    vm_id = path.split("/")[4]
-                    config_data = data
-                    response, status_code = update_vm_config(proxmox, int(vm_id), config_data)
-                else:
-                    status_code = 404
-                    response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Resource not found: {path}"}}
+                        response = {"error": {"code": "Base.1.0.GeneralError", "message": "Invalid JSON payload"}}
+                        response_body = json.dumps(response).encode('utf-8')
+                        self.send_response(status_code)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(response_body)))
+                        self.send_header("Connection", "close")
+                        self.end_headers()
+                        self.wfile.write(response_body)
+                        return
+
+                    data = json.loads(post_data.decode('utf-8'))
+                    if path.startswith("/redfish/v1/Systems/") and "/Actions/ComputerSystem.Reset" in path:
+                        vm_id = path.split("/")[4]
+                        reset_type = data.get("ResetType", "")
+                        if reset_type == "On":
+                            response, status_code = power_on(proxmox, int(vm_id))
+                        elif reset_type == "ForceOff":
+                            response, status_code = power_off(proxmox, int(vm_id))
+                        elif reset_type == "ForceRestart":
+                            response, status_code = reboot(proxmox, int(vm_id))
+                        elif reset_type == "Pause":
+                            response, status_code = suspend_vm(proxmox, int(vm_id))
+                        elif reset_type == "Resume":
+                            response, status_code = resume_vm(proxmox, int(vm_id))
+                        elif reset_type == "ForceStop":
+                            response, status_code = stop_vm(proxmox, int(vm_id))
+                        else:
+                            status_code = 400
+                            response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Unsupported ResetType: {reset_type}"}}
+                    elif path.startswith("/redfish/v1/Systems/") and "/VirtualMedia/CDROM/Actions/VirtualMedia.InsertMedia" in path:
+                        vm_id = path.split("/")[4]
+                        iso_path = data.get("Image")
+                        response, status_code = manage_virtual_media(proxmox, int(vm_id), "InsertMedia", iso_path)
+                    elif path.startswith("/redfish/v1/Systems/") and "/VirtualMedia/CDROM/Actions/VirtualMedia.EjectMedia" in path:
+                        vm_id = path.split("/")[4]
+                        response, status_code = manage_virtual_media(proxmox, int(vm_id), "EjectMedia")
+                    elif path.startswith("/redfish/v1/Systems/") and "/Actions/ComputerSystem.UpdateConfig" in path:
+                        vm_id = path.split("/")[4]
+                        config_data = data
+                        response, status_code = update_vm_config(proxmox, int(vm_id), config_data)
+                    else:
+                        status_code = 404
+                        response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Resource not found: {path}"}}
 
         # Convert response to JSON and calculate its length
         response_body = json.dumps(response).encode('utf-8')
@@ -667,6 +670,17 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                 status_code = 404
                 response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Resource not found: {path}"}}
 
+        # Convert response to JSON and calculate its length
+        response_body = json.dumps(response).encode('utf-8')
+        content_length = len(response_body)
+
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(content_length)) 
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(json.dumps(response).encode('utf-8'))
+
 
     def do_PATCH(self):
         content_length = int(self.headers.get('Content-Length', 0))
@@ -698,22 +712,48 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                             status_code = 400
                             response = {"error": {"code": "Base.1.0.InvalidRequest", "message": f"Unsupported BootSourceOverrideEnabled: {enabled}"}}
                         else:
-                            # Get current boot order
-                            config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
-                            current_boot = config.get("boot", "order=scsi0;ide2;net0")
-                            new_boot_order = reorder_boot_order(current_boot, target)
-                            config_data = {"boot": f"order={new_boot_order}"}
-                            task = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.set(**config_data)
-                            response = {
-                                "@odata.id": f"/redfish/v1/TaskService/Tasks/{task}",
-                                "@odata.type": "#Task.v1_0_0.Task",
-                                "Id": task,
-                                "Name": f"Set Boot Order for VM {vm_id}",
-                                "TaskState": "Running",
-                                "TaskStatus": "OK",
-                                "Messages": [{"Message": f"Boot order set to {target} ({new_boot_order}) for VM {vm_id}"}]
-                            }
-                            status_code = 202
+                            # Check the VM's current power state
+                            status = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).status.current.get()
+                            redfish_status = {
+                                "running": "On",
+                                "stopped": "Off",
+                                "paused": "Paused",
+                                "shutdown": "Off"
+                            }.get(status["status"], "Unknown")
+
+                            # If VM is not Off, reject the boot order change
+                            if redfish_status != "Off":
+                                status_code = 400  # Bad Request
+                                response = {
+                                    "error": {
+                                        "code": "Base.1.0.ActionNotSupported",
+                                        "message": f"Cannot modify boot configuration while VM {vm_id} is {redfish_status}. BootSourceOverrideEnabled is Disabled.",
+                                        "@Message.ExtendedInfo": [{
+                                            "MessageId": "Base.1.0.ActionNotSupported",
+                                            "Message": "The action to modify the boot order is not supported while the system is powered on or in a paused state. Power off the system and try again.",
+                                            "MessageArgs": ["Boot order modification", redfish_status],
+                                            "Severity": "Warning",
+                                            "Resolution": "Power off the system using a Reset action (e.g., ForceOff) and retry the operation."
+                                        }]
+                                    }
+                                }
+                            else:
+                                # Proceed with boot order change if VM is Off
+                                config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
+                                current_boot = config.get("boot", "order=scsi0;ide2;net0")
+                                new_boot_order = reorder_boot_order(current_boot, target)
+                                config_data = {"boot": f"order={new_boot_order}"}
+                                task = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.set(**config_data)
+                                response = {
+                                    "@odata.id": f"/redfish/v1/TaskService/Tasks/{task}",
+                                    "@odata.type": "#Task.v1_0_0.Task",
+                                    "Id": task,
+                                    "Name": f"Set Boot Order for VM {vm_id}",
+                                    "TaskState": "Running",
+                                    "TaskStatus": "OK",
+                                    "Messages": [{"Message": f"Boot order set to {target} ({new_boot_order}) for VM {vm_id}"}]
+                                }
+                                status_code = 202
                     else:
                         status_code = 400
                         response = {"error": {"code": "Base.1.0.InvalidRequest", "message": "Boot object required in PATCH request"}}
