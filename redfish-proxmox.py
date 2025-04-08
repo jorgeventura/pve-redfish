@@ -365,16 +365,52 @@ def get_vm_status(proxmox, vm_id):
         cdrom_info = config.get("ide2", "none")
         cdrom_media = "None" if "none" in cdrom_info else cdrom_info.split(",")[0]
 
-        # Boot info
-        boot_order = config.get("boot", "order=scsi0;ide2;net0")  # Default for UEFI VMs
+        boot_order = config.get("boot", "order=scsi0;ide2;net0")
         boot_target = "Hdd"
         if "net" in boot_order and boot_order.index("net") < boot_order.index(";"):
             boot_target = "Pxe"
         elif "ide2" in boot_order and boot_order.index("ide2") < boot_order.index(";"):
             boot_target = "Cd"
-
-        # Determine BootSourceOverrideEnabled based on PowerState
         boot_override_enabled = "Enabled" if redfish_status == "Off" else "Disabled"
+
+        # Extract and decode SMBIOS Type 1 data
+        smbios1 = config.get("smbios1", "")
+        smbios_data = {
+            "UUID": None,
+            "Manufacturer": "Proxmox",
+            "ProductName": "QEMU Virtual Machine",
+            "Version": None,
+            "SerialNumber": None,
+            "SKUNumber": None,
+            "Family": None
+        }
+        if smbios1:
+            smbios_entries = smbios1.split(",")
+            for entry in smbios_entries:
+                if "=" in entry:
+                    key, value = entry.split("=", 1)
+                    # Decode Base64 if applicable
+                    try:
+                        decoded_value = base64.b64decode(value).decode("utf-8")
+                        if decoded_value.isprintable():  # Ensure it’s valid text
+                            value = decoded_value
+                    except (base64.binascii.Error, UnicodeDecodeError):
+                        pass  # Use original value if decoding fails
+
+                    if key == "uuid":
+                        smbios_data["UUID"] = value
+                    elif key == "manufacturer":
+                        smbios_data["Manufacturer"] = value
+                    elif key == "product":
+                        smbios_data["ProductName"] = value
+                    elif key == "version":
+                        smbios_data["Version"] = value
+                    elif key == "serial":
+                        smbios_data["SerialNumber"] = value
+                    elif key == "sku":
+                        smbios_data["SKUNumber"] = value
+                    elif key == "family":
+                        smbios_data["Family"] = value
 
         response = {
             "@odata.id": f"/redfish/v1/Systems/{vm_id}",
@@ -399,16 +435,120 @@ def get_vm_status(proxmox, vm_id):
                 "Devices": [{"Name": "CDROM", "Type": "CDROM", "CapacityBytes": 0, "Media": cdrom_media}]
             },
             "Boot": {
-                "BootSourceOverrideEnabled": boot_override_enabled,  # Dynamic value
+                "BootSourceOverrideEnabled": boot_override_enabled,
                 "BootSourceOverrideTarget": boot_target,
                 "BootSourceOverrideSupported": ["Pxe", "Cd", "Hdd"]
             },
-            "Manufacturer": "Proxmox",
-            "Model": "QEMU Virtual Machine"
+            "Manufacturer": smbios_data["Manufacturer"],
+            "Model": smbios_data["ProductName"],
+            "SerialNumber": smbios_data["SerialNumber"],
+            "SKU": smbios_data["SKUNumber"],
+            "AssetTag": smbios_data["Family"],
+            "Bios": {
+                "@odata.id": f"/redfish/v1/Systems/{vm_id}/Bios"
+            }
         }
         return response
     except Exception as e:
         return handle_proxmox_error("Status retrieval", e, vm_id)
+
+
+def get_bios(proxmox, vm_id):
+    try:
+        config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
+        firmware_type = config.get("bios", "seabios")
+        firmware_mode = "BIOS" if firmware_type == "seabios" else "UEFI"
+
+        # Minimal BIOS info with link to SMBIOS details
+        response = {
+            "@odata.id": f"/redfish/v1/Systems/{vm_id}/Bios",
+            "@odata.type": "#Bios.v1_0_0.Bios",
+            "Id": "Bios",
+            "Name": "BIOS Settings",
+            "FirmwareMode": firmware_mode,  # From previous enhancement
+            "Attributes": {
+                "BootOrder": config.get("boot", "order=scsi0;ide2;net0")
+            },
+            "Links": {
+                "SMBIOS": {
+                    "@odata.id": f"/redfish/v1/Systems/{vm_id}/Bios/SMBIOS"
+                }
+            }
+        }
+        return response
+    except Exception as e:
+        return handle_proxmox_error("BIOS retrieval", e, vm_id)
+
+
+
+def get_smbios_type1(proxmox, vm_id):
+    """
+    Retrieve SMBIOS Type 1 (System Information) data from Proxmox VM config,
+    including firmware type (BIOS or UEFI).
+    """
+    try:
+        config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
+        smbios1 = config.get("smbios1", "")
+        firmware_type = config.get("bios", "seabios")  # Default to seabios if not specified
+        
+        # Map Proxmox bios setting to Redfish-friendly terms
+        firmware_mode = "BIOS" if firmware_type == "seabios" else "UEFI"
+        
+        # Default SMBIOS values
+        smbios_data = {
+            "UUID": None,
+            "Manufacturer": "Proxmox",
+            "ProductName": "QEMU Virtual Machine",
+            "Version": None,
+            "SerialNumber": None,
+            "SKUNumber": None,
+            "Family": None
+        }
+
+        # Parse smbios1 string if it exists
+        if smbios1:
+            smbios_entries = smbios1.split(",")
+            for entry in smbios_entries:
+                if "=" in entry:
+                    key, value = entry.split("=", 1)
+
+                    # Attempt to decode Base64 if it looks encoded
+                    try:
+                        decoded_value = base64.b64decode(value).decode("utf-8")
+                        # Only use decoded value if it’s valid UTF-8 and not a UUID
+                        if key != "uuid" and decoded_value.isprintable():
+                            value = decoded_value
+                    except (base64.binascii.Error, UnicodeDecodeError):
+                        pass  # Keep original value if decoding fails
+
+                    if key == "uuid":
+                        smbios_data["UUID"] = value
+                    elif key == "manufacturer":
+                        smbios_data["Manufacturer"] = value
+                    elif key == "product":
+                        smbios_data["ProductName"] = value
+                    elif key == "version":
+                        smbios_data["Version"] = value
+                    elif key == "serial":
+                        smbios_data["SerialNumber"] = value
+                    elif key == "sku":
+                        smbios_data["SKUNumber"] = value
+                    elif key == "family":
+                        smbios_data["Family"] = value
+
+        response = {
+            "@odata.id": f"/redfish/v1/Systems/{vm_id}/Bios/SMBIOS",
+            "@odata.type": "#Bios.v1_0_0.Bios",
+            "Id": "SMBIOS",
+            "Name": "SMBIOS System Information",
+            "FirmwareMode": firmware_mode,  # New field to indicate BIOS or UEFI
+            "Attributes": {
+                "SMBIOSType1": smbios_data
+            }
+        }
+        return response
+    except Exception as e:
+        return handle_proxmox_error("SMBIOS retrieval", e, vm_id)
 
 
 def get_vm_config(proxmox, vm_id):
@@ -577,13 +717,13 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(response).encode('utf-8'))
 
-    # In RedfishRequestHandler.do_GET, replace the relevant elif block:
+
     def do_GET(self):
         path = self.path
         response = {}
         status_code = 200
         self.protocol_version = 'HTTP/1.1'
-
+    
         valid, message = validate_token(self.headers)
         if not valid:
             status_code = 401
@@ -613,16 +753,10 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                     }
                 except Exception as e:
                     status_code = 500
-                    response = {
-                        "error": {
-                            "code": "Base.1.0.GeneralError",
-                            "message": f"Failed to retrieve VM list: {str(e)}",
-                        }
-                    }
+                    response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Failed to retrieve VM list: {str(e)}"}}
             elif path.startswith("/redfish/v1/Systems/") and "/VirtualMedia" in path:
                 vm_id = path.split("/")[4]
                 if path == f"/redfish/v1/Systems/{vm_id}/VirtualMedia":
-                    # List virtual media devices (just one CDROM for now)
                     response = {
                         "@odata.id": f"/redfish/v1/Systems/{vm_id}/VirtualMedia",
                         "@odata.type": "#VirtualMediaCollection.VirtualMediaCollection",
@@ -631,7 +765,6 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                         "Members@odata.count": 1
                     }
                 elif path == f"/redfish/v1/Systems/{vm_id}/VirtualMedia/CDROM":
-                    # Get current virtual media state
                     config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
                     cdrom_info = config.get("ide2", "none")
                     inserted = "none" not in cdrom_info
@@ -656,9 +789,22 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                 else:
                     status_code = 404
                     response = {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": "VirtualMedia resource not found"}}
+            elif path.startswith("/redfish/v1/Systems/") and "/Bios" in path:
+                vm_id = path.split("/")[4]
+                if path == f"/redfish/v1/Systems/{vm_id}/Bios":
+                    response = get_bios(proxmox, int(vm_id))
+                    if isinstance(response, tuple):  # Handle error case
+                        response, status_code = response
+                elif path == f"/redfish/v1/Systems/{vm_id}/Bios/SMBIOS":
+                    response = get_smbios_type1(proxmox, int(vm_id))
+                    if isinstance(response, tuple):  # Handle error case
+                        response, status_code = response
+                else:
+                    status_code = 404
+                    response = {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": "BIOS resource not found"}}
             elif path.startswith("/redfish/v1/Systems/") and "/Config" in path:
                 vm_id = path.split("/")[4]
-                response = get_vm_config(proxmox, int(vm_id))  # Optional custom endpoint
+                response = get_vm_config(proxmox, int(vm_id))
                 if isinstance(response, tuple):  # Handle error case
                     response, status_code = response
             elif path.startswith("/redfish/v1/Systems/") and len(path.split("/")) > 4:
@@ -669,17 +815,15 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
             else:
                 status_code = 404
                 response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Resource not found: {path}"}}
-
-        # Convert response to JSON and calculate its length
+    
         response_body = json.dumps(response).encode('utf-8')
         content_length = len(response_body)
-
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(content_length)) 
+        self.send_header("Content-Length", str(content_length))
         self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(json.dumps(response).encode('utf-8'))
+        self.wfile.write(response_body)
 
 
     def do_PATCH(self):

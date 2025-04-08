@@ -100,7 +100,12 @@ The following functions are implemented:
   ```bash
   curl -k -X GET -H "X-Auth-Token: some-token" https://pve-node/redfish/v1/Systems
   ```
-### 12 Boot Management (PATCH)
+### 12. Get VM Bios data (type 1)
+  - **redfish endpoint:** /redfish/v1/Systems
+  ```bash
+  curl -k -X GET -H "X-Auth-Token: some-token" https://pve-node/redfish/v1/Systems/<vm_id>/Bios/SMBIOS
+  ```
+### 13 Boot Management (PATCH)
   - **redfish endpoint:** https://pve-m5/redfish/v1/Systems/101
   - **data request:** '{"Boot": {"BootSourceOverrideTarget": "Hdd", "BootSourceOverrideEnabled": "Once"}}'
   - **BootSourceOverrideTarget:** "Pxe" | "Cd" | "Hdd"
@@ -125,8 +130,6 @@ The following functions are implemented:
     -d '{"Boot": {"BootSourceOverrideTarget": "Cd", "BootSourceOverrideEnabled": "Once"}}' \
     https://pve-m5/redfish/v1/Systems/101
   ```
-
-
 
 
 # Installation
@@ -336,30 +339,24 @@ The Redfish specification defines a broad set of resources and endpoints for man
 -   **Why Missing**: Proxmox logs are host-level or task-based, not VM-specific in a Redfish-compatible format.
 -   **Potential Implementation**: Map Proxmox task logs to a LogService, but it’s not straightforward.
 
-#### 12\. **BIOS (/redfish/v1/Systems/{system\_id}/Bios)**
-
--   **Description**: Manages BIOS settings and firmware.
--   **Why Missing**: VMs use QEMU/KVM emulation, not physical BIOS; settings are part of VM config, not a separate entity.
--   **Potential Implementation**: Map VM boot options (e.g., boot config) to a Bios resource, but it’s limited.
-
-#### 13\. **Secure Boot (/redfish/v1/Systems/{system\_id}/SecureBoot)**
+#### 12\. **Secure Boot (/redfish/v1/Systems/{system\_id}/SecureBoot)**
 
 -   **Description**: Controls Secure Boot settings.
 -   **Why Missing**: Not applicable to Proxmox VMs; Secure Boot is guest-OS dependent and not managed via Proxmox API.
 
-#### 14\. **Update Service (/redfish/v1/UpdateService)**
+#### 13\. **Update Service (/redfish/v1/UpdateService)**
 
 -   **Description**: Manages firmware and software updates.
 -   **Why Missing**: Applies to physical hardware or host-level updates, not VMs.
 -   **Potential Implementation**: Could simulate for VM templates or QEMU updates, but it’s out of scope.
 
-#### 15\. **Task Service (/redfish/v1/TaskService)**
+#### 14\. **Task Service (/redfish/v1/TaskService)**
 
 -   **Description**: Tracks asynchronous tasks (e.g., power operations).
 -   **Why Missing**: Your daemon returns task IDs (e.g., in power\_on), but there’s no endpoint to query task status.
 -   **Potential Implementation**: Store task states in sessions and expose via TaskService.
 
-#### 16\. **Account Service (/redfish/v1/AccountService)**
+#### 15\. **Account Service (/redfish/v1/AccountService)**
 
 -   **Description**: Manages user accounts and roles.
 -   **Why Missing**: Authentication is handled via Proxmox credentials or tokens, not Redfish accounts.
@@ -374,10 +371,4 @@ The Redfish specification defines a broad set of resources and endpoints for man
 -   **Granular VM Details**: Detailed CPU, memory, storage, and network info.
     -   **Reason**: Limited by Proxmox API and abstraction.
 
-### Conclusion
 
-Your daemon focuses on VM lifecycle management (power, config, media) and aligns well with the Systems resource in Redfish, which is appropriate for Proxmox. Missing endpoints are either inapplicable (hardware-specific) or unimplemented (management features). If you want to expand coverage, consider:
-
-1.  Adding TaskService to track task progress.
-2.  Mapping virtual disks and networks to Storage and NetworkInterfaces.
-3.  Simulating Chassis or Managers for the Proxmox node.
