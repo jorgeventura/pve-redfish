@@ -306,41 +306,77 @@ def update_vm_config(proxmox, vm_id, config_data):
         return handle_proxmox_error("Update Configuration", e, vm_id)
 
 
-def reorder_boot_order(current_order, target):
+def reorder_boot_order(proxmox, vm_id, current_order, target):
     """
-    Reorder Proxmox boot devices based on Redfish target.
+    Reorder Proxmox boot devices based on Redfish target, preserving all devices including multiple hard drives.
     
     Args:
-        current_order (str): Current boot order (e.g., "scsi0;ide2;net0").
+        proxmox: ProxmoxAPI instance
+        vm_id (int): The VM ID to fetch config for
+        current_order (str): Current boot order (e.g., "scsi0;ide2;net0" or empty).
         target (str): Redfish BootSourceOverrideTarget ("Pxe", "Cd", "Hdd").
     
     Returns:
-        str: New boot order (e.g., "net0;scsi0;ide2").
+        str: New boot order (e.g., "scsi0;ide0;ide2;net0"), or an empty string if no devices match.
     """
-    # Split current order into devices; default to common devices if unset
+    # Fetch VM configuration
+    try:
+        config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
+    except Exception as e:
+        config = {}  # Fallback to empty config if retrieval fails
+
+    # Split current order into devices; handle empty or unset cases
     if not current_order or "order=" not in current_order:
-        devices = ["scsi0", "ide2", "net0"]  # Fallback for UEFI VMs
+        devices = []
     else:
         devices = current_order.replace("order=", "").split(";")
 
-    # Identify device types (simplified mapping)
-    disk_dev = next((d for d in devices if ("scsi" in d or "sata" in d) and "ide2" not in d), "scsi0")
-    cd_dev = next((d for d in devices if "ide2" in d), "ide2")
-    net_dev = next((d for d in devices if "net" in d), "net0")
+    # Identify available devices from config
+    disk_devs = []  # List of all hard drives (SCSI, SATA, IDE without media=cdrom)
+    cd_dev = None   # CD-ROM device
+    net_dev = None  # Network device
 
-    # Reorder based on target
-    if target == "Pxe":
-        new_order = [net_dev, disk_dev, cd_dev]
-    elif target == "Cd":
-        new_order = [cd_dev, disk_dev, net_dev]
-    elif target == "Hdd":
-        new_order = [disk_dev, cd_dev, net_dev]
+    # Check for hard drives and CD-ROMs (SCSI, SATA, IDE)
+    for dev_type in ["scsi", "sata", "ide"]:
+        for i in range(4):  # ide0-3, scsi0-3, sata0-3 (simplified range)
+            dev_key = f"{dev_type}{i}"
+            if dev_key in config:
+                dev_value = config[dev_key]
+                if "media=cdrom" in dev_value:
+                    cd_dev = dev_key  # CD-ROM found
+                elif dev_type in ["scsi", "sata"] or (dev_type == "ide" and "media=cdrom" not in dev_value):
+                    disk_devs.append(dev_key)  # Hard drive found
+
+    # Check for network devices
+    for i in range(4):  # net0-3 (simplified range)
+        net_key = f"net{i}"
+        if net_key in config:
+            net_dev = net_key
+            break
+
+    # Build the full list of available devices, preserving all from config and current order
+    available_devs = [d for d in devices if d in config] if devices else []
+    for dev in disk_devs + ([cd_dev] if cd_dev else []) + ([net_dev] if net_dev else []):
+        if dev and dev not in available_devs:
+            available_devs.append(dev)
+
+    # Reorder based on target, keeping all devices
+    new_order = []
+    if target == "Pxe" and net_dev:
+        new_order = [net_dev] + [d for d in available_devs if d != net_dev]
+    elif target == "Cd" and cd_dev:
+        new_order = [cd_dev] + [d for d in available_devs if d != cd_dev]
+    elif target == "Hdd" and disk_devs:
+        # Prioritize the first hard drive (e.g., scsi0), then include others
+        primary_disk = disk_devs[0]
+        new_order = [primary_disk] + [d for d in available_devs if d != primary_disk]
     else:
-        new_order = [disk_dev, cd_dev, net_dev]  # Default to disk-first
+        # Fallback: keep the existing order or use all available devices
+        new_order = available_devs
 
-    # Remove duplicates and ensure all devices are included
+    # Remove duplicates and ensure valid devices only
     unique_devices = list(dict.fromkeys(new_order))
-    return ";".join(unique_devices)
+    return ";".join(unique_devices) if unique_devices else ""
 
 
 def get_vm_status(proxmox, vm_id):
@@ -884,9 +920,9 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                             else:
                                 # Proceed with boot order change if VM is Off
                                 config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
-                                current_boot = config.get("boot", "order=scsi0;ide2;net0")
-                                new_boot_order = reorder_boot_order(current_boot, target)
-                                config_data = {"boot": f"order={new_boot_order}"}
+                                current_boot = config.get("boot", "")
+                                new_boot_order = reorder_boot_order(proxmox, int(vm_id), current_boot, target)
+                                config_data = {"boot": f"order={new_boot_order}" if new_boot_order else ""}
                                 task = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.set(**config_data)
                                 response = {
                                     "@odata.id": f"/redfish/v1/TaskService/Tasks/{task}",
