@@ -393,12 +393,23 @@ def get_vm_status(proxmox, vm_id):
         status = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).status.current.get()
         config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
 
-        redfish_status = {
-            "running": "On",
-            "stopped": "Off",
-            "paused": "Paused",
-            "shutdown": "Off"
-        }.get(status["status"], "Unknown")
+        # Assume status["status"] contains Proxmox state: "running", "paused", "stopped", etc.
+        redfish_status = "Off"  # Default PowerState
+        state = "Disabled"  # Default State
+        health = "OK"  # Default Health
+        if status["status"] == "running":
+            redfish_status = "On"
+            state = "Enabled"
+        elif status["status"] == "paused":
+            redfish_status = "On"
+            state = "Quiesced"
+        elif status["status"] == "stopped":
+            redfish_status = "Off"
+            state = "Disabled"
+        else:
+            redfish_status = "Off"
+            state = "Absent"
+            health = "Critical"
 
         memory_mb = config.get("memory", 0)
         try:
@@ -467,8 +478,9 @@ def get_vm_status(proxmox, vm_id):
             "Name": config.get("name", f"VM-{vm_id}"),
             "PowerState": redfish_status,
             "Status": {
-                "State": "Enabled" if status["status"] in ["running", "paused"] else "Absent",
-                "Health": "OK" if status["status"] in ["running", "paused"] else "OK"
+                "State": state,
+                "Health": health,
+                "HealthRollup": "OK"
             },
             "Processors": {
                 "@odata.id": f"/redfish/v1/Systems/{vm_id}/Processors",
@@ -519,7 +531,7 @@ def get_vm_status(proxmox, vm_id):
                         "Status": {"State": "Enabled", "Health": "OK"}
                     }
                 ]
-            }
+            },
             "Boot": {
                 "BootSourceOverrideEnabled": boot_override_enabled,
                 "BootSourceOverrideTarget": boot_target,
