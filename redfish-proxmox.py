@@ -484,6 +484,12 @@ def get_vm_status(proxmox, vm_id):
                 "BootSourceOverrideTarget": boot_target,
                 "BootSourceOverrideSupported": ["Pxe", "Cd", "Hdd"]
             },
+            "Actions": {
+                "#ComputerSystem.Reset": {
+                    "target": f"/redfish/v1/Systems/{vm_id}/Actions/ComputerSystem.Reset",
+                    "ResetType@Redfish.AllowableValues": ["On", "ForceOff", "ForceRestart", "Pause", "Resume", "ForceStop"]
+                }
+            },
             "Manufacturer": smbios_data["Manufacturer"],
             "Model": smbios_data["ProductName"],
             "SerialNumber": smbios_data["SerialNumber"],
