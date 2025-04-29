@@ -10,6 +10,17 @@ from proxmoxer.core import ResourceException    # type: ignore
 import secrets  # For token generation
 import time
 import base64
+import logging
+from logging.handlers import SysLogHandler
+
+# Configure logging to send to system journal
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s %(levelname)s: %(message)s',
+    handlers=[SysLogHandler(address='/dev/log')]
+)
+logger = logging.getLogger('redfish-proxmox')
+logger.setLevel(logging.DEBUG)
 
 # Proxmox configuration (replace with your actual values)
 PROXMOX_HOST = "localhost"
@@ -124,13 +135,11 @@ def get_proxmox_api(headers):
         raise Exception(f"Failed to connect to Proxmox API: {str(e)}")
 
 
-
 def get_credentials(token):
     if token in sessions:
         session = sessions[token]
         return session["username"], session["password"]
     raise Exception("No credentials found for token")
-
 
 
 # Power control functions (unchanged)
@@ -213,6 +222,7 @@ def resume_vm(proxmox, vm_id):
     except Exception as e:
         return handle_proxmox_error("Resume", e, vm_id)
 
+
 def stop_vm(proxmox, vm_id):
     try:
         task = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).status.stop.post()
@@ -286,7 +296,6 @@ def manage_virtual_media(proxmox, vm_id, action, iso_path=None):
             }, 400
     except Exception as e:
         return handle_proxmox_error(f"Virtual Media {action}", e, vm_id)
-
 
 
 # Update VM config (unchanged)
@@ -516,7 +525,6 @@ def get_bios(proxmox, vm_id):
         return handle_proxmox_error("BIOS retrieval", e, vm_id)
 
 
-
 def get_smbios_type1(proxmox, vm_id):
     """
     Retrieve SMBIOS Type 1 (System Information) data from Proxmox VM config,
@@ -641,16 +649,15 @@ def validate_token(headers):
 # Custom request handler
 class RedfishRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
-
-        post_data = None
-        content_length = 0
-        if self.headers['Content-Length'] is not None:
-            content_length = int(self.headers['Content-Length'])
-            
-        if content_length == 0:
-            post_data = b'{}'
-        else:
-            post_data = self.rfile.read(content_length)
+        # Log request details
+        content_length = int(self.headers.get('Content-Length', 0))
+        post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+        try:
+            post_data_str = post_data.decode('utf-8')
+        except UnicodeDecodeError:
+            post_data_str = "<Non-UTF-8 data>"
+        headers_str = "\n".join(f"{k}: {v}" for k, v in self.headers.items())
+        logger.debug(f"POST Request: path={self.path}, headers=\n{headers_str}\n, body={post_data_str}")
 
         path = self.path
         response = {}
@@ -690,7 +697,6 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                 proxmox = get_proxmox_api(self.headers)
 
                 # Handle payload parsing based on endpoint
-                # data = {}
                 if post_data:
                     try:
                         data = json.loads(post_data.decode('utf-8'))
@@ -704,6 +710,8 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                         self.send_header("Connection", "close")
                         self.end_headers()
                         self.wfile.write(response_body)
+                        # Log response
+                        logger.debug(f"POST Response: path={self.path}, status={status_code}, body={json.dumps(response)}")
                         return
 
                     data = json.loads(post_data.decode('utf-8'))
@@ -753,8 +761,14 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(response).encode('utf-8'))
 
+        # Log response
+        logger.debug(f"POST Response: path={self.path}, status={status_code}, body={json.dumps(response)}")
 
     def do_GET(self):
+        # Log request details
+        headers_str = "\n".join(f"{k}: {v}" for k, v in self.headers.items())
+        logger.debug(f"GET Request: path={self.path}, headers=\n{headers_str}")
+
         path = self.path
         response = {}
         status_code = 200
@@ -861,8 +875,20 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(response_body)
 
+        # Log response
+        logger.debug(f"GET Response: path={self.path}, status={status_code}, body={json.dumps(response)}")
 
     def do_PATCH(self):
+        # Log request details
+        content_length = int(self.headers.get('Content-Length', 0))
+        post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+        try:
+            post_data_str = post_data.decode('utf-8')
+        except UnicodeDecodeError:
+            post_data_str = "<Non-UTF-8 data>"
+        headers_str = "\n".join(f"{k}: {v}" for k, v in self.headers.items())
+        logger.debug(f"PATCH Request: path={self.path}, headers=\n{headers_str}\n, body={post_data_str}")
+
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length)
         path = self.path.rstrip("/")
@@ -954,6 +980,9 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(response_body)
+
+        # Log response
+        logger.debug(f"PATCH Response: path={self.path}, status={status_code}, body={json.dumps(response)}")
 
 
 # Server function (unchanged)
