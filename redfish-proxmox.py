@@ -421,11 +421,11 @@ def get_vm_status(proxmox, vm_id):
         # Extract and decode SMBIOS Type 1 data
         smbios1 = config.get("smbios1", "")
         smbios_data = {
-            "UUID": None,
+            "UUID": config.get("smbios1", "").split("uuid=")[1].split(",")[0] if "uuid=" in config.get("smbios1", "") else f"proxmox-vm-{vm_id}",
             "Manufacturer": "Proxmox",
             "ProductName": "QEMU Virtual Machine",
             "Version": None,
-            "SerialNumber": None,
+            "SerialNumber": config.get("smbios1", "").split("serial=")[1].split(",")[0] if "serial=" in config.get("smbios1", "") else f"serial-vm-{vm_id}",
             "SKUNumber": None,
             "Family": None
         }
