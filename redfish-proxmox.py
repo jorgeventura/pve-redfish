@@ -411,11 +411,13 @@ def get_vm_status(proxmox, vm_id):
         cdrom_media = "None" if "none" in cdrom_info else cdrom_info.split(",")[0]
 
         boot_order = config.get("boot", "order=scsi0;ide2;net0")
-        boot_target = "Hdd"
+        boot_target = "Pxe"
         if "net" in boot_order and boot_order.index("net") < boot_order.index(";"):
             boot_target = "Pxe"
         elif "ide2" in boot_order and boot_order.index("ide2") < boot_order.index(";"):
             boot_target = "Cd"
+        elif "scsi" in boot_order and boot_order.index("scsi") < boot_order.index(";"):
+            boot_target = "Hdd"
         boot_override_enabled = "Enabled" if redfish_status == "Off" else "Disabled"
 
         # Extract and decode SMBIOS Type 1 data
@@ -465,20 +467,59 @@ def get_vm_status(proxmox, vm_id):
             "Name": config.get("name", f"VM-{vm_id}"),
             "PowerState": redfish_status,
             "Status": {
-                "State": "Enabled" if status["status"] in ["running", "paused"] else "Disabled",
-                "Health": "OK" if status["status"] in ["running", "paused"] else "Critical"
+                "State": "Enabled" if status["status"] in ["running", "paused"] else "Absent",
+                "Health": "OK" if status["status"] in ["running", "paused"] else "OK"
             },
-            "ProcessorSummary": {
+            "Processors": {
+                "@odata.id": f"/redfish/v1/Systems/{vm_id}/Processors",
                 "Count": config.get("cores", 0),
-                "Sockets": config.get("sockets", 1)
+                "Members": [
+                    {
+                        "@odata.id": f"/redfish/v1/Systems/{vm_id}/Processors/0",
+                        "@odata.type": "#Processor.v1_0_0.Processor",
+                        "Id": "0",
+                        "Name": "CPU 0",
+                        "ProcessorType": "CPU",
+                        "TotalCores": config.get("cores", 0),
+                        "Status": {"State": "Enabled", "Health": "OK"}
+                    }
+                ]
             },
-            "MemorySummary": {
-                "TotalSystemMemoryGiB": round(memory_gib, 2)
+            "Memory": {
+                "@odata.id": f"/redfish/v1/Systems/{vm_id}/Memory",
+                "TotalSystemMemoryGiB": round(memory_gib, 2),
+                "Members": [
+                    {
+                        "@odata.id": f"/redfish/v1/Systems/{vm_id}/Memory/0",
+                        "@odata.type": "#Memory.v1_0_0.Memory",
+                        "Id": "0",
+                        "Name": "Memory 0",
+                        "CapacityMiB": config.get("memory", 0),
+                        "MemoryType": "DRAM",
+                        "Status": {"State": "Enabled", "Health": "OK"}
+                    }
+                ]
             },
-            "SimpleStorage": {
-                "@odata.id": f"/redfish/v1/Systems/{vm_id}/SimpleStorage",
-                "Devices": [{"Name": "CDROM", "Type": "CDROM", "CapacityBytes": 0, "Media": cdrom_media}]
-            },
+            "Storage": {
+                "@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage",
+                "Members": [
+                    {
+                        "@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/0",
+                        "@odata.type": "#Storage.v1_0_0.Storage",
+                        "Id": "0",
+                        "Name": "CDROM Storage",
+                        "Drives": [
+                            {
+                                "@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/0/Drives/CDROM",
+                                "Name": "CDROM",
+                                "MediaType": "CDROM",
+                                "CapacityBytes": 0
+                            }
+                        ],
+                        "Status": {"State": "Enabled", "Health": "OK"}
+                    }
+                ]
+            }
             "Boot": {
                 "BootSourceOverrideEnabled": boot_override_enabled,
                 "BootSourceOverrideTarget": boot_target,
