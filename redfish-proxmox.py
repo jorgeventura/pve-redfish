@@ -583,9 +583,6 @@ def get_vm_status(proxmox, vm_id):
         return handle_proxmox_error("Status retrieval", e, vm_id)
 
 
-
-
-
 def get_bios(proxmox, vm_id):
     try:
         config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
@@ -733,6 +730,168 @@ def validate_token(headers):
                 return False, "Token expired"
     return False, "Invalid or no token provided"
 
+def get_processor_collection(proxmox, vm_id):
+    try:
+        # For simplicity, assume one processor per VM
+        response = {
+            "@odata.id": f"/redfish/v1/Systems/{vm_id}/Processors",
+            "@odata.type": "#ProcessorCollection.ProcessorCollection",
+            "Name": "Processors Collection",
+            "Members@odata.count": 1,
+            "Members": [
+                {"@odata.id": f"/redfish/v1/Systems/{vm_id}/Processors/CPU1"}
+            ]
+        }
+        return response
+    except Exception as e:
+        return handle_proxmox_error("Processor collection retrieval", e, vm_id)
+
+def get_processor_detail(proxmox, vm_id, processor_id):
+    try:
+        config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
+        cpu_cores = config.get("cores", 1)
+        cpu_sockets = config.get("sockets", 1)
+        cpu_type = config.get("cpu", "kvm64")
+        processor_architecture = "x86" if "kvm64" in cpu_type or "host" in cpu_type else "unknown"
+        total_threads = config.get("vcpus", cpu_cores)
+
+        if processor_id != "CPU1":
+            return {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": f"Processor {processor_id} not found"}}, 404
+
+        response = {
+            "@odata.id": f"/redfish/v1/Systems/{vm_id}/Processors/CPU1",
+            "@odata.type": "#Processor.v1_3_0.Processor",
+            "Id": "CPU1",
+            "Name": "CPU1",
+            "ProcessorType": "CPU",
+            "ProcessorArchitecture": processor_architecture,
+            "InstructionSet": "x86-64",
+            "Manufacturer": "QEMU",
+            "Model": cpu_type,
+            "ProcessorId": {
+                "VendorID": "QEMU"
+            },
+            "Socket": f"CPU {cpu_sockets}",
+            "TotalCores": cpu_cores,
+            "TotalThreads": total_threads,
+            "Status": {"State": "Enabled", "Health": "OK"}
+        }
+        return response
+    except Exception as e:
+        return handle_proxmox_error(f"Processor detail retrieval for {processor_id}", e, vm_id)
+    def do_GET(self):
+        # Log request details
+        headers_str = "\n".join(f"{k}: {v}" for k, v in self.headers.items())
+        logger.debug(f"GET Request: path={self.path}, headers=\n{headers_str}")
+
+        path = self.path
+        response = {}
+        status_code = 200
+        self.protocol_version = 'HTTP/1.1'
+    
+        valid, message = validate_token(self.headers)
+        if not valid:
+            status_code = 401
+            response = {"error": {"code": "Base.1.0.GeneralError", "message": message}}
+        else:
+            proxmox = get_proxmox_api(self.headers)
+            path = self.path.rstrip("/")
+            if path == "/redfish/v1":
+                response = {
+                    "@odata.id": "/redfish/v1",
+                    "@odata.type": "#ServiceRoot.v1_0_0.ServiceRoot",
+                    "Id": "RootService",
+                    "Name": "Redfish Root Service",
+                    "RedfishVersion": "1.0.0",
+                    "Systems": {"@odata.id": "/redfish/v1/Systems"}
+                }
+            elif path == "/redfish/v1/Systems":
+                try:
+                    vm_list = proxmox.nodes(PROXMOX_NODE).qemu.get()
+                    members = [{"@odata.id": f"/redfish/v1/Systems/{vm['vmid']}"} for vm in vm_list]
+                    response = {
+                        "@odata.id": "/redfish/v1/Systems",
+                        "@odata.type": "#SystemCollection.SystemCollection",
+                        "Name": "Systems Collection",
+                        "Members": members,
+                        "Members@odata.count": len(members)
+                    }
+                except Exception as e:
+                    status_code = 500
+                    response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Failed to retrieve VM list: {str(e)}"}}
+            elif path.startswith("/redfish/v1/Systems/") and "/VirtualMedia" in path:
+                vm_id = path.split("/")[4]
+                if path == f"/redfish/v1/Systems/{vm_id}/VirtualMedia":
+                    response = {
+                        "@odata.id": f"/redfish/v1/Systems/{vm_id}/VirtualMedia",
+                        "@odata.type": "#VirtualMediaCollection.VirtualMediaCollection",
+                        "Name": "Virtual Media Collection",
+                        "Members": [{"@odata.id": f"/redfish/v1/Systems/{vm_id}/VirtualMedia/CDROM"}],
+                        "Members@odata.count": 1
+                    }
+                elif path == f"/redfish/v1/Systems/{vm_id}/VirtualMedia/CDROM":
+                    config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
+                    cdrom_info = config.get("ide2", "none")
+                    inserted = "none" not in cdrom_info
+                    image = cdrom_info.split(",")[0] if inserted else None
+                    response = {
+                        "@odata.id": f"/redfish/v1/Systems/{vm_id}/VirtualMedia/CDROM",
+                        "@odata.type": "#VirtualMedia.v1_0_0.VirtualMedia",
+                        "Id": "CDROM",
+                        "Name": "Virtual CD-ROM Drive",
+                        "MediaTypes": ["CD"],
+                        "Inserted": inserted,
+                        "Image": image,
+                        "Actions": {
+                            "#VirtualMedia.InsertMedia": {
+                                "target": f"/redfish/v1/Systems/{vm_id}/VirtualMedia/CDROM/Actions/VirtualMedia.InsertMedia"
+                            },
+                            "#VirtualMedia.EjectMedia": {
+                                "target": f"/redfish/v1/Systems/{vm_id}/VirtualMedia/CDROM/Actions/VirtualMedia.EjectMedia"
+                            }
+                        }
+                    }
+                else:
+                    status_code = 404
+                    response = {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": "VirtualMedia resource not found"}}
+            elif path.startswith("/redfish/v1/Systems/") and "/Bios" in path:
+                vm_id = path.split("/")[4]
+                if path == f"/redfish/v1/Systems/{vm_id}/Bios":
+                    response = get_bios(proxmox, int(vm_id))
+                    if isinstance(response, tuple):  # Handle error case
+                        response, status_code = response
+                elif path == f"/redfish/v1/Systems/{vm_id}/Bios/SMBIOS":
+                    response = get_smbios_type1(proxmox, int(vm_id))
+                    if isinstance(response, tuple):  # Handle error case
+                        response, status_code = response
+                else:
+                    status_code = 404
+                    response = {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": "BIOS resource not found"}}
+            elif path.startswith("/redfish/v1/Systems/") and "/Config" in path:
+                vm_id = path.split("/")[4]
+                response = get_vm_config(proxmox, int(vm_id))
+                if isinstance(response, tuple):  # Handle error case
+                    response, status_code = response
+            elif path.startswith("/redfish/v1/Systems/") and len(path.split("/")) > 4:
+                vm_id = path.split("/")[4]
+                response = get_vm_status(proxmox, int(vm_id))
+                if isinstance(response, tuple):  # Handle error case
+                    response, status_code = response
+            else:
+                status_code = 404
+                response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Resource not found: {path}"}}
+    
+        response_body = json.dumps(response).encode('utf-8')
+        content_length = len(response_body)
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(content_length))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(response_body)
+
+        # Log response
+        logger.debug(f"GET Response: path={self.path}, status={status_code}, body={json.dumps(response)}")
 
 # Custom request handler
 class RedfishRequestHandler(BaseHTTPRequestHandler):
@@ -857,18 +1016,17 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
         headers_str = "\n".join(f"{k}: {v}" for k, v in self.headers.items())
         logger.debug(f"GET Request: path={self.path}, headers=\n{headers_str}")
 
-        path = self.path
+        path = self.path.rstrip("/")
         response = {}
         status_code = 200
         self.protocol_version = 'HTTP/1.1'
-    
+
         valid, message = validate_token(self.headers)
         if not valid:
             status_code = 401
             response = {"error": {"code": "Base.1.0.GeneralError", "message": message}}
         else:
             proxmox = get_proxmox_api(self.headers)
-            path = self.path.rstrip("/")
             if path == "/redfish/v1":
                 response = {
                     "@odata.id": "/redfish/v1",
@@ -892,79 +1050,39 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                 except Exception as e:
                     status_code = 500
                     response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Failed to retrieve VM list: {str(e)}"}}
-            elif path.startswith("/redfish/v1/Systems/") and "/VirtualMedia" in path:
-                vm_id = path.split("/")[4]
-                if path == f"/redfish/v1/Systems/{vm_id}/VirtualMedia":
-                    response = {
-                        "@odata.id": f"/redfish/v1/Systems/{vm_id}/VirtualMedia",
-                        "@odata.type": "#VirtualMediaCollection.VirtualMediaCollection",
-                        "Name": "Virtual Media Collection",
-                        "Members": [{"@odata.id": f"/redfish/v1/Systems/{vm_id}/VirtualMedia/CDROM"}],
-                        "Members@odata.count": 1
-                    }
-                elif path == f"/redfish/v1/Systems/{vm_id}/VirtualMedia/CDROM":
-                    config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
-                    cdrom_info = config.get("ide2", "none")
-                    inserted = "none" not in cdrom_info
-                    image = cdrom_info.split(",")[0] if inserted else None
-                    response = {
-                        "@odata.id": f"/redfish/v1/Systems/{vm_id}/VirtualMedia/CDROM",
-                        "@odata.type": "#VirtualMedia.v1_0_0.VirtualMedia",
-                        "Id": "CDROM",
-                        "Name": "Virtual CD-ROM Drive",
-                        "MediaTypes": ["CD"],
-                        "Inserted": inserted,
-                        "Image": image,
-                        "Actions": {
-                            "#VirtualMedia.InsertMedia": {
-                                "target": f"/redfish/v1/Systems/{vm_id}/VirtualMedia/CDROM/Actions/VirtualMedia.InsertMedia"
-                            },
-                            "#VirtualMedia.EjectMedia": {
-                                "target": f"/redfish/v1/Systems/{vm_id}/VirtualMedia/CDROM/Actions/VirtualMedia.EjectMedia"
-                            }
-                        }
-                    }
-                else:
-                    status_code = 404
-                    response = {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": "VirtualMedia resource not found"}}
-            elif path.startswith("/redfish/v1/Systems/") and "/Bios" in path:
-                vm_id = path.split("/")[4]
-                if path == f"/redfish/v1/Systems/{vm_id}/Bios":
-                    response = get_bios(proxmox, int(vm_id))
-                    if isinstance(response, tuple):  # Handle error case
+            elif path.startswith("/redfish/v1/Systems/"):
+                parts = path.split("/")
+                if len(parts) == 5 and parts[4].isdigit():  # /redfish/v1/Systems/<vm_id>
+                    vm_id = int(parts[4])
+                    response = get_vm_status(proxmox, vm_id)
+                    if isinstance(response, tuple):
                         response, status_code = response
-                elif path == f"/redfish/v1/Systems/{vm_id}/Bios/SMBIOS":
-                    response = get_smbios_type1(proxmox, int(vm_id))
-                    if isinstance(response, tuple):  # Handle error case
+                elif len(parts) == 6 and parts[5] == "Processors":  # /redfish/v1/Systems/<vm_id>/Processors
+                    vm_id = int(parts[4])
+                    response = get_processor_collection(proxmox, vm_id)
+                    if isinstance(response, tuple):
+                        response, status_code = response
+                elif len(parts) == 7 and parts[5] == "Processors" and parts[6] == "CPU1":  # /redfish/v1/Systems/<vm_id>/Processors/CPU1
+                    vm_id = int(parts[4])
+                    response = get_processor_detail(proxmox, vm_id, "CPU1")
+                    if isinstance(response, tuple):
                         response, status_code = response
                 else:
                     status_code = 404
-                    response = {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": "BIOS resource not found"}}
-            elif path.startswith("/redfish/v1/Systems/") and "/Config" in path:
-                vm_id = path.split("/")[4]
-                response = get_vm_config(proxmox, int(vm_id))
-                if isinstance(response, tuple):  # Handle error case
-                    response, status_code = response
-            elif path.startswith("/redfish/v1/Systems/") and len(path.split("/")) > 4:
-                vm_id = path.split("/")[4]
-                response = get_vm_status(proxmox, int(vm_id))
-                if isinstance(response, tuple):  # Handle error case
-                    response, status_code = response
+                    response = {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": f"Resource not found: {path}"}}
             else:
                 status_code = 404
                 response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Resource not found: {path}"}}
-    
+
         response_body = json.dumps(response).encode('utf-8')
-        content_length = len(response_body)
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(content_length))
+        self.send_header("Content-Length", str(len(response_body)))
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(response_body)
-
-        # Log response
         logger.debug(f"GET Response: path={self.path}, status={status_code}, body={json.dumps(response)}")
+
 
     def do_PATCH(self):
         # Log request details
