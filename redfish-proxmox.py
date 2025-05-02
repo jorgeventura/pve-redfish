@@ -388,201 +388,6 @@ def reorder_boot_order(proxmox, vm_id, current_order, target):
     return ";".join(unique_devices) if unique_devices else ""
 
 
-def get_vm_status(proxmox, vm_id):
-    try:
-        status = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).status.current.get()
-        config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
-
-        # Map Proxmox status to Redfish PowerState and State
-        redfish_status = "Off"
-        state = "Disabled"
-        health = "OK"
-        if status["status"] == "running":
-            redfish_status = "On"
-            state = "Enabled"
-        elif status["status"] == "paused":
-            redfish_status = "On"
-            state = "Quiesced"
-        elif status["status"] == "stopped":
-            redfish_status = "Off"
-            state = "Disabled"
-        else:
-            redfish_status = "Off"
-            state = "Absent"
-            health = "Critical"
-
-        # Memory conversion
-        memory_mb = config.get("memory", 0)
-        try:
-            memory_mb = float(memory_mb)
-        except (ValueError, TypeError):
-            memory_mb = 0
-        memory_gib = memory_mb / 1024.0
-
-        # CDROM info
-        cdrom_info = config.get("ide2", "none")
-        cdrom_media = "None" if "none" in cdrom_info else cdrom_info.split(",")[0]
-
-        # Boot configuration with robust handling
-        boot_order = config.get("boot", "")
-        boot_target = "None"
-        if boot_order:
-            # Remove "order=" prefix if present
-            if boot_order.startswith("order="):
-                boot_order = boot_order[len("order="):]
-            # Split by semicolon, handle single device case
-            devices = boot_order.split(";") if ";" in boot_order else [boot_order]
-            # Map first valid device to Redfish target
-            for device in devices:
-                if device.startswith("net"):
-                    boot_target = "Pxe"
-                    break
-                elif device == "ide2":
-                    boot_target = "Cd"
-                    break
-                elif device.startswith(("scsi", "sata", "ide")) and "media=cdrom" not in config.get(device, ""):
-                    boot_target = "Hdd"
-                    break
-        boot_override_enabled = "Enabled" if redfish_status == "Off" else "Disabled"
-
-        # SMBIOS Type 1 data
-        smbios1 = config.get("smbios1", "")
-        smbios_data = {
-            "UUID": config.get("smbios1", "").split("uuid=")[1].split(",")[0] if "uuid=" in smbios1 else f"proxmox-vm-{vm_id}",
-            "Manufacturer": "Proxmox",
-            "ProductName": "QEMU Virtual Machine",
-            "Version": None,
-            "SerialNumber": config.get("smbios1", "").split("serial=")[1].split(",")[0] if "serial=" in smbios1 else f"serial-vm-{vm_id}",
-            "SKUNumber": None,
-            "Family": None
-        }
-        if smbios1:
-            smbios_entries = smbios1.split(",")
-            for entry in smbios_entries:
-                if "=" in entry:
-                    key, value = entry.split("=", 1)
-                    try:
-                        decoded_value = base64.b64decode(value).decode("utf-8")
-                        if decoded_value.isprintable():
-                            value = decoded_value
-                    except (base64.binascii.Error, UnicodeDecodeError):
-                        pass
-                    if key == "uuid":
-                        smbios_data["UUID"] = value
-                    elif key == "manufacturer":
-                        smbios_data["Manufacturer"] = value
-                    elif key == "product":
-                        smbios_data["ProductName"] = value
-                    elif key == "version":
-                        smbios_data["Version"] = value
-                    elif key == "sku":
-                        smbios_data["SKUNumber"] = value
-                    elif key == "family":
-                        smbios_data["Family"] = value
-
-        # Processor information using proxmoxer
-        cpu_cores = config.get("cores", 1)
-        cpu_sockets = config.get("sockets", 1)
-        cpu_type = config.get("cpu", "kvm64")
-        processor_architecture = "x86" if "kvm64" in cpu_type or "host" in cpu_type else "unknown"
-        total_threads = config.get("vcpus", cpu_cores)  # Assume vcpus = threads, fallback to cores
-
-        response = {
-            "@odata.id": f"/redfish/v1/Systems/{vm_id}",
-            "@odata.type": "#ComputerSystem.v1_13_0.ComputerSystem",
-            "@odata.context": "/redfish/v1/$metadata#ComputerSystem.ComputerSystem",
-            "Id": str(vm_id),
-            "Name": config.get("name", f"VM-{vm_id}"),
-            "PowerState": redfish_status,
-            "Status": {
-                "State": state,
-                "Health": health,
-                "HealthRollup": "OK"
-            },
-            "Processors": {
-                "@odata.id": f"/redfish/v1/Systems/{vm_id}/Processors",
-                "@odata.count": 1,
-                "Members": [
-                    {
-                        "@odata.id": f"/redfish/v1/Systems/{vm_id}/Processors/CPU1",
-                        "@odata.type": "#Processor.v1_3_0.Processor",
-                        "Id": "CPU1",
-                        "Name": "CPU1",
-                        "ProcessorType": "CPU",
-                        "ProcessorArchitecture": processor_architecture,
-                        "InstructionSet": "x86-64",
-                        "Manufacturer": "QEMU",
-                        "Model": cpu_type,
-                        "ProcessorId": {
-                            "VendorID": "QEMU"
-                        },
-                        "Socket": f"CPU {cpu_sockets}",
-                        "TotalCores": cpu_cores,
-                        "TotalThreads": total_threads,
-                        "Status": {"State": "Enabled", "Health": "OK"}
-                    }
-                ]
-            },
-            "Memory": {
-                "@odata.id": f"/redfish/v1/Systems/{vm_id}/Memory",
-                "TotalSystemMemoryGiB": round(memory_gib, 2),
-                "Members": [
-                    {
-                        "@odata.id": f"/redfish/v1/Systems/{vm_id}/Memory/0",
-                        "@odata.type": "#Memory.v1_0_0.Memory",
-                        "Id": "0",
-                        "Name": "Memory 0",
-                        "CapacityMiB": memory_mb,
-                        "MemoryType": "DRAM",
-                        "Status": {"State": "Enabled", "Health": "OK"}
-                    }
-                ]
-            },
-            "Storage": {
-                "@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage",
-                "Members": [
-                    {
-                        "@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/0",
-                        "@odata.type": "#Storage.v1_0_0.Storage",
-                        "Id": "0",
-                        "Name": "CDROM Storage",
-                        "Drives": [
-                            {
-                                "@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/0/Drives/CDROM",
-                                "Name": "CDROM",
-                                "MediaType": "CDROM",
-                                "CapacityBytes": 0
-                            }
-                        ],
-                        "Status": {"State": "Enabled", "Health": "OK"}
-                    }
-                ]
-            },
-            "Boot": {
-                "BootSourceOverrideEnabled": boot_override_enabled,
-                "BootSourceOverrideTarget": boot_target,
-                "BootSourceOverrideSupported": ["Pxe", "Cd", "Hdd"]
-            },
-            "Actions": {
-                "#ComputerSystem.Reset": {
-                    "target": f"/redfish/v1/Systems/{vm_id}/Actions/ComputerSystem.Reset",
-                    "ResetType@Redfish.AllowableValues": ["On", "ForceOff", "ForceRestart", "Pause", "Resume", "ForceStop"]
-                }
-            },
-            "Manufacturer": smbios_data["Manufacturer"],
-            "Model": smbios_data["ProductName"],
-            "SerialNumber": smbios_data["SerialNumber"],
-            "SKU": smbios_data["SKUNumber"],
-            "AssetTag": smbios_data["Family"],
-            "Bios": {
-                "@odata.id": f"/redfish/v1/Systems/{vm_id}/Bios"
-            }
-        }
-        return response
-    except Exception as e:
-        return handle_proxmox_error("Status retrieval", e, vm_id)
-
-
 def get_bios(proxmox, vm_id):
     try:
         config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
@@ -779,119 +584,295 @@ def get_processor_detail(proxmox, vm_id, processor_id):
         return response
     except Exception as e:
         return handle_proxmox_error(f"Processor detail retrieval for {processor_id}", e, vm_id)
-    def do_GET(self):
-        # Log request details
-        headers_str = "\n".join(f"{k}: {v}" for k, v in self.headers.items())
-        logger.debug(f"GET Request: path={self.path}, headers=\n{headers_str}")
 
-        path = self.path
-        response = {}
-        status_code = 200
-        self.protocol_version = 'HTTP/1.1'
-    
-        valid, message = validate_token(self.headers)
-        if not valid:
-            status_code = 401
-            response = {"error": {"code": "Base.1.0.GeneralError", "message": message}}
-        else:
-            proxmox = get_proxmox_api(self.headers)
-            path = self.path.rstrip("/")
-            if path == "/redfish/v1":
-                response = {
-                    "@odata.id": "/redfish/v1",
-                    "@odata.type": "#ServiceRoot.v1_0_0.ServiceRoot",
-                    "Id": "RootService",
-                    "Name": "Redfish Root Service",
-                    "RedfishVersion": "1.0.0",
-                    "Systems": {"@odata.id": "/redfish/v1/Systems"}
+def get_storage_collection(proxmox, vm_id):
+    try:
+        response = {
+            "@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage",
+            "@odata.type": "#StorageCollection.StorageCollection",
+            "Name": "Storage Collection",
+            "Members@odata.count": 1,
+            "Members": [
+                {"@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/1"}
+            ]
+        }
+        return response
+    except Exception as e:
+        return handle_proxmox_error("Storage collection retrieval", e, vm_id)
+
+def get_storage_detail(proxmox, vm_id, storage_id):
+    try:
+        if storage_id != "1":
+            return {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": f"Storage {storage_id} not found"}}, 404
+
+        config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
+        drives = []
+        for key in config:
+            if key.startswith(("scsi", "sata", "ide")) and "media=cdrom" not in config[key]:
+                drive_id = key
+                drives.append({"@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/1/Drives/{drive_id}"})
+            elif key == "ide2" and "none" not in config[key]:
+                drives.append({"@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/1/Drives/ide2"})
+
+        response = {
+            "@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/1",
+            "@odata.type": "#Storage.v1_10_1.Storage",
+            "Id": "1",
+            "Name": "Local Storage Controller",
+            "Description": "Virtual Storage Controller",
+            "Status": {
+                "State": "Enabled",
+                "Health": "OK",
+                "HealthRollup": "OK"
+            },
+            "Controllers": {
+                "@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/1/Controllers"
+            },
+            "StorageControllers": [
+                {
+                    "@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/1#/StorageControllers/0",
+                    "@odata.type": "#StorageController.v1_6_0.StorageController",
+                    "MemberId": "0",
+                    "Name": "Virtual Storage Controller",
+                    "Status": {
+                        "State": "Enabled",
+                        "Health": "OK"
+                    },
+                    "Manufacturer": "QEMU",
+                    "SupportedControllerProtocols": ["PCIe"],
+                    "SupportedDeviceProtocols": ["SATA"],
+                    "SupportedRAIDTypes": ["None"]
                 }
-            elif path == "/redfish/v1/Systems":
-                try:
-                    vm_list = proxmox.nodes(PROXMOX_NODE).qemu.get()
-                    members = [{"@odata.id": f"/redfish/v1/Systems/{vm['vmid']}"} for vm in vm_list]
-                    response = {
-                        "@odata.id": "/redfish/v1/Systems",
-                        "@odata.type": "#SystemCollection.SystemCollection",
-                        "Name": "Systems Collection",
-                        "Members": members,
-                        "Members@odata.count": len(members)
-                    }
-                except Exception as e:
-                    status_code = 500
-                    response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Failed to retrieve VM list: {str(e)}"}}
-            elif path.startswith("/redfish/v1/Systems/") and "/VirtualMedia" in path:
-                vm_id = path.split("/")[4]
-                if path == f"/redfish/v1/Systems/{vm_id}/VirtualMedia":
-                    response = {
-                        "@odata.id": f"/redfish/v1/Systems/{vm_id}/VirtualMedia",
-                        "@odata.type": "#VirtualMediaCollection.VirtualMediaCollection",
-                        "Name": "Virtual Media Collection",
-                        "Members": [{"@odata.id": f"/redfish/v1/Systems/{vm_id}/VirtualMedia/CDROM"}],
-                        "Members@odata.count": 1
-                    }
-                elif path == f"/redfish/v1/Systems/{vm_id}/VirtualMedia/CDROM":
-                    config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
-                    cdrom_info = config.get("ide2", "none")
-                    inserted = "none" not in cdrom_info
-                    image = cdrom_info.split(",")[0] if inserted else None
-                    response = {
-                        "@odata.id": f"/redfish/v1/Systems/{vm_id}/VirtualMedia/CDROM",
-                        "@odata.type": "#VirtualMedia.v1_0_0.VirtualMedia",
-                        "Id": "CDROM",
-                        "Name": "Virtual CD-ROM Drive",
-                        "MediaTypes": ["CD"],
-                        "Inserted": inserted,
-                        "Image": image,
-                        "Actions": {
-                            "#VirtualMedia.InsertMedia": {
-                                "target": f"/redfish/v1/Systems/{vm_id}/VirtualMedia/CDROM/Actions/VirtualMedia.InsertMedia"
-                            },
-                            "#VirtualMedia.EjectMedia": {
-                                "target": f"/redfish/v1/Systems/{vm_id}/VirtualMedia/CDROM/Actions/VirtualMedia.EjectMedia"
-                            }
-                        }
-                    }
-                else:
-                    status_code = 404
-                    response = {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": "VirtualMedia resource not found"}}
-            elif path.startswith("/redfish/v1/Systems/") and "/Bios" in path:
-                vm_id = path.split("/")[4]
-                if path == f"/redfish/v1/Systems/{vm_id}/Bios":
-                    response = get_bios(proxmox, int(vm_id))
-                    if isinstance(response, tuple):  # Handle error case
-                        response, status_code = response
-                elif path == f"/redfish/v1/Systems/{vm_id}/Bios/SMBIOS":
-                    response = get_smbios_type1(proxmox, int(vm_id))
-                    if isinstance(response, tuple):  # Handle error case
-                        response, status_code = response
-                else:
-                    status_code = 404
-                    response = {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": "BIOS resource not found"}}
-            elif path.startswith("/redfish/v1/Systems/") and "/Config" in path:
-                vm_id = path.split("/")[4]
-                response = get_vm_config(proxmox, int(vm_id))
-                if isinstance(response, tuple):  # Handle error case
-                    response, status_code = response
-            elif path.startswith("/redfish/v1/Systems/") and len(path.split("/")) > 4:
-                vm_id = path.split("/")[4]
-                response = get_vm_status(proxmox, int(vm_id))
-                if isinstance(response, tuple):  # Handle error case
-                    response, status_code = response
-            else:
-                status_code = 404
-                response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Resource not found: {path}"}}
-    
-        response_body = json.dumps(response).encode('utf-8')
-        content_length = len(response_body)
-        self.send_response(status_code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(content_length))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(response_body)
+            ],
+            "Drives": drives,
+            "Volumes": {
+                "@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/1/Volumes"
+            }
+        }
+        return response
+    except Exception as e:
+        return handle_proxmox_error(f"Storage detail retrieval for {storage_id}", e, vm_id)
 
-        # Log response
-        logger.debug(f"GET Response: path={self.path}, status={status_code}, body={json.dumps(response)}")
+def get_drive_detail(proxmox, vm_id, storage_id, drive_id):
+    try:
+        if storage_id != "1":
+            return {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": f"Storage {storage_id} not found"}}, 404
+
+        config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
+        if drive_id not in config:
+            return {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": f"Drive {drive_id} not found"}}, 404
+
+        drive_info = config[drive_id]
+        is_cdrom = "media=cdrom" in drive_info
+        media_type = "CDROM" if is_cdrom else "HDD"
+        capacity_bytes = 0  # Proxmox doesn't provide disk size; assume 0 for now
+
+        response = {
+            "@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/1/Drives/{drive_id}",
+            "@odata.type": "#Drive.v1_4_0.Drive",
+            "Id": drive_id,
+            "Name": f"Drive {drive_id}",
+            "MediaType": media_type,
+            "CapacityBytes": capacity_bytes,
+            "Status": {
+                "State": "Enabled",
+                "Health": "OK"
+            },
+            "Protocol": "SATA",
+            "Manufacturer": "QEMU"
+        }
+        return response
+    except Exception as e:
+        return handle_proxmox_error(f"Drive detail retrieval for {drive_id}", e, vm_id)
+
+def get_volume_collection(proxmox, vm_id, storage_id):
+    try:
+        if storage_id != "1":
+            return {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": f"Storage {storage_id} not found"}}, 404
+
+        response = {
+            "@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/1/Volumes",
+            "@odata.type": "#VolumeCollection.VolumeCollection",
+            "Name": "Volume Collection",
+            "Members@odata.count": 0,
+            "Members": []
+        }
+        return response
+    except Exception as e:
+        return handle_proxmox_error("Volume collection retrieval", e, vm_id)
+
+def get_controller_collection(proxmox, vm_id, storage_id):
+    try:
+        if storage_id != "1":
+            return {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": f"Storage {storage_id} not found"}}, 404
+
+        response = {
+            "@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/1/Controllers",
+            "@odata.type": "#ControllerCollection.ControllerCollection",
+            "Name": "Controller Collection",
+            "Members@odata.count": 1,
+            "Members": [
+                {"@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/1/Controllers/0"}
+            ]
+        }
+        return response
+    except Exception as e:
+        return handle_proxmox_error("Controller collection retrieval", e, vm_id)
+
+def get_vm_status(proxmox, vm_id):
+    try:
+        status = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).status.current.get()
+        config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
+
+        # Map Proxmox status to Redfish PowerState and State
+        redfish_status = "Off"
+        state = "Enabled"  # Changed to Enabled for stopped VMs
+        health = "OK"
+        if status["status"] == "running":
+            redfish_status = "On"
+            state = "Enabled"
+        elif status["status"] == "paused":
+            redfish_status = "On"
+            state = "Quiesced"
+        elif status["status"] == "stopped":
+            redfish_status = "Off"
+            state = "Enabled"
+        else:
+            redfish_status = "Off"
+            state = "Absent"
+            health = "Critical"
+
+        # Memory conversion
+        memory_mb = config.get("memory", 0)
+        try:
+            memory_mb = float(memory_mb)
+        except (ValueError, TypeError):
+            memory_mb = 0
+        memory_gib = memory_mb / 1024.0
+
+        # CDROM info
+        cdrom_info = config.get("ide2", "none")
+        cdrom_media = "None" if "none" in cdrom_info else cdrom_info.split(",")[0]
+
+        # Boot configuration
+        boot_order = config.get("boot", "")
+        boot_target = "None"
+        if boot_order:
+            if boot_order.startswith("order="):
+                boot_order = boot_order[len("order="):]
+            devices = boot_order.split(";") if ";" in boot_order else [boot_order]
+            for device in devices:
+                if device.startswith("net"):
+                    boot_target = "Pxe"
+                    break
+                elif device == "ide2":
+                    boot_target = "Cd"
+                    break
+                elif device.startswith(("scsi", "sata", "ide")) and "media=cdrom" not in config.get(device, ""):
+                    boot_target = "Hdd"
+                    break
+        boot_override_enabled = "Enabled" if redfish_status == "Off" else "Disabled"
+
+        # SMBIOS Type 1 data
+        smbios1 = config.get("smbios1", "")
+        smbios_data = {
+            "UUID": config.get("smbios1", "").split("uuid=")[1].split(",")[0] if "uuid=" in smbios1 else f"proxmox-vm-{vm_id}",
+            "Manufacturer": "Proxmox",
+            "ProductName": "QEMU Virtual Machine",
+            "Version": None,
+            "SerialNumber": config.get("smbios1", "").split("serial=")[1].split(",")[0] if "serial=" in smbios1 else f"serial-vm-{vm_id}",
+            "SKUNumber": None,
+            "Family": None
+        }
+        if smbios1:
+            smbios_entries = smbios1.split(",")
+            for entry in smbios_entries:
+                if "=" in entry:
+                    key, value = entry.split("=", 1)
+                    try:
+                        decoded_value = base64.b64decode(value).decode("utf-8")
+                        if decoded_value.isprintable():
+                            value = decoded_value
+                    except (base64.binascii.Error, UnicodeDecodeError):
+                        pass
+                    if key == "uuid":
+                        smbios_data["UUID"] = value
+                    elif key == "manufacturer":
+                        smbios_data["Manufacturer"] = value
+                    elif key == "product":
+                        smbios_data["ProductName"] = value
+                    elif key == "version":
+                        smbios_data["Version"] = value
+                    elif key == "serial":
+                        smbios_data["SerialNumber"] = value
+                    elif key == "sku":
+                        smbios_data["SKUNumber"] = value
+                    elif key == "family":
+                        smbios_data["Family"] = value
+
+        # Processor information
+        cpu_cores = config.get("cores", 1)
+        cpu_sockets = config.get("sockets", 1)
+        cpu_type = config.get("cpu", "kvm64")
+        processor_architecture = "x86" if "kvm64" in cpu_type or "host" in cpu_type else "unknown"
+        total_threads = config.get("vcpus", cpu_cores)
+
+        response = {
+            "@odata.id": f"/redfish/v1/Systems/{vm_id}",
+            "@odata.type": "#ComputerSystem.v1_13_0.ComputerSystem",
+            "@odata.context": "/redfish/v1/$metadata#ComputerSystem.ComputerSystem",
+            "Id": str(vm_id),
+            "Name": config.get("name", f"VM-{vm_id}"),
+            "PowerState": redfish_status,
+            "Status": {
+                "State": state,
+                "Health": health,
+                "HealthRollup": "OK"
+            },
+            "Processors": {
+                "@odata.id": f"/redfish/v1/Systems/{vm_id}/Processors"
+            },
+            "Memory": {
+                "@odata.id": f"/redfish/v1/Systems/{vm_id}/Memory",
+                "TotalSystemMemoryGiB": round(memory_gib, 2),
+                "Members": [
+                    {
+                        "@odata.id": f"/redfish/v1/Systems/{vm_id}/Memory/0",
+                        "@odata.type": "#Memory.v1_0_0.Memory",
+                        "Id": "0",
+                        "Name": "Memory 0",
+                        "CapacityMiB": memory_mb,
+                        "MemoryType": "DRAM",
+                        "Status": {"State": "Enabled", "Health": "OK"}
+                    }
+                ]
+            },
+            "Storage": {
+                "@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage"
+            },
+            "Boot": {
+                "BootSourceOverrideEnabled": boot_override_enabled,
+                "BootSourceOverrideTarget": boot_target,
+                "BootSourceOverrideSupported": ["Pxe", "Cd", "Hdd"]
+            },
+            "Actions": {
+                "#ComputerSystem.Reset": {
+                    "target": f"/redfish/v1/Systems/{vm_id}/Actions/ComputerSystem.Reset",
+                    "ResetType@Redfish.AllowableValues": ["On", "ForceOff", "ForceRestart", "Pause", "Resume", "ForceStop"]
+                }
+            },
+            "Manufacturer": smbios_data["Manufacturer"],
+            "Model": smbios_data["ProductName"],
+            "SerialNumber": smbios_data["SerialNumber"],
+            "SKU": smbios_data["SKUNumber"],
+            "AssetTag": smbios_data["Family"],
+            "Bios": {
+                "@odata.id": f"/redfish/v1/Systems/{vm_id}/Bios"
+            }
+        }
+        return response
+    except Exception as e:
+        return handle_proxmox_error("Status retrieval", e, vm_id)
 
 # Custom request handler
 class RedfishRequestHandler(BaseHTTPRequestHandler):
@@ -1027,6 +1008,7 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
             response = {"error": {"code": "Base.1.0.GeneralError", "message": message}}
         else:
             proxmox = get_proxmox_api(self.headers)
+            parts = path.split("/")
             if path == "/redfish/v1":
                 response = {
                     "@odata.id": "/redfish/v1",
@@ -1051,7 +1033,6 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                     status_code = 500
                     response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Failed to retrieve VM list: {str(e)}"}}
             elif path.startswith("/redfish/v1/Systems/"):
-                parts = path.split("/")
                 if len(parts) == 5 and parts[4].isdigit():  # /redfish/v1/Systems/<vm_id>
                     vm_id = int(parts[4])
                     response = get_vm_status(proxmox, vm_id)
@@ -1065,6 +1046,36 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                 elif len(parts) == 7 and parts[5] == "Processors" and parts[6] == "CPU1":  # /redfish/v1/Systems/<vm_id>/Processors/CPU1
                     vm_id = int(parts[4])
                     response = get_processor_detail(proxmox, vm_id, "CPU1")
+                    if isinstance(response, tuple):
+                        response, status_code = response
+                elif len(parts) == 6 and parts[5] == "Storage":  # /redfish/v1/Systems/<vm_id>/Storage
+                    vm_id = int(parts[4])
+                    response = get_storage_collection(proxmox, vm_id)
+                    if isinstance(response, tuple):
+                        response, status_code = response
+                elif len(parts) == 7 and parts[5] == "Storage" and parts[6].isdigit():  # /redfish/v1/Systems/<vm_id>/Storage/<storage_id>
+                    vm_id = int(parts[4])
+                    storage_id = parts[6]
+                    response = get_storage_detail(proxmox, vm_id, storage_id)
+                    if isinstance(response, tuple):
+                        response, status_code = response
+                elif len(parts) == 9 and parts[5] == "Storage" and parts[7] == "Drives":  # /redfish/v1/Systems/<vm_id>/Storage/<storage_id>/Drives/<drive_id>
+                    vm_id = int(parts[4])
+                    storage_id = parts[6]
+                    drive_id = parts[8]
+                    response = get_drive_detail(proxmox, vm_id, storage_id, drive_id)
+                    if isinstance(response, tuple):
+                        response, status_code = response
+                elif len(parts) == 8 and parts[5] == "Storage" and parts[7] == "Volumes":  # /redfish/v1/Systems/<vm_id>/Storage/<storage_id>/Volumes
+                    vm_id = int(parts[4])
+                    storage_id = parts[6]
+                    response = get_volume_collection(proxmox, vm_id, storage_id)
+                    if isinstance(response, tuple):
+                        response, status_code = response
+                elif len(parts) == 8 and parts[5] == "Storage" and parts[7] == "Controllers":  # /redfish/v1/Systems/<vm_id>/Storage/<storage_id>/Controllers
+                    vm_id = int(parts[4])
+                    storage_id = parts[6]
+                    response = get_controller_collection(proxmox, vm_id, storage_id)
                     if isinstance(response, tuple):
                         response, status_code = response
                 else:
