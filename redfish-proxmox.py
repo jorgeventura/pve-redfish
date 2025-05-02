@@ -600,6 +600,7 @@ def get_storage_collection(proxmox, vm_id):
     except Exception as e:
         return handle_proxmox_error("Storage collection retrieval", e, vm_id)
 
+
 def get_storage_detail(proxmox, vm_id, storage_id):
     try:
         if storage_id != "1":
@@ -608,11 +609,12 @@ def get_storage_detail(proxmox, vm_id, storage_id):
         config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
         drives = []
         for key in config:
-            if key.startswith(("scsi", "sata", "ide")) and "media=cdrom" not in config[key]:
+            if key.startswith(("scsi", "sata", "ide")) and "unused" not in key:
                 drive_id = key
-                drives.append({"@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/1/Drives/{drive_id}"})
-            elif key == "ide2" and "none" not in config[key]:
-                drives.append({"@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/1/Drives/ide2"})
+                if "media=cdrom" in config[key]:
+                    drives.append({"@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/1/Drives/{drive_id}"})
+                else:
+                    drives.append({"@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/1/Drives/{drive_id}"})
 
         response = {
             "@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/1",
@@ -653,19 +655,20 @@ def get_storage_detail(proxmox, vm_id, storage_id):
     except Exception as e:
         return handle_proxmox_error(f"Storage detail retrieval for {storage_id}", e, vm_id)
 
+
 def get_drive_detail(proxmox, vm_id, storage_id, drive_id):
     try:
         if storage_id != "1":
             return {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": f"Storage {storage_id} not found"}}, 404
 
         config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
-        if drive_id not in config:
+        if drive_id not in config or "unused" in drive_id:
             return {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": f"Drive {drive_id} not found"}}, 404
 
         drive_info = config[drive_id]
         is_cdrom = "media=cdrom" in drive_info
         media_type = "CDROM" if is_cdrom else "HDD"
-        capacity_bytes = 0  # Proxmox doesn't provide disk size; assume 0 for now
+        capacity_bytes = 0  # Size not retrievable via proxmoxer; defaults to 0
 
         response = {
             "@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/1/Drives/{drive_id}",
@@ -701,6 +704,7 @@ def get_volume_collection(proxmox, vm_id, storage_id):
     except Exception as e:
         return handle_proxmox_error("Volume collection retrieval", e, vm_id)
 
+
 def get_controller_collection(proxmox, vm_id, storage_id):
     try:
         if storage_id != "1":
@@ -719,6 +723,69 @@ def get_controller_collection(proxmox, vm_id, storage_id):
     except Exception as e:
         return handle_proxmox_error("Controller collection retrieval", e, vm_id)
 
+
+def get_ethernet_interface_collection(proxmox, vm_id):
+    try:
+        config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
+        interfaces = []
+        for key in config:
+            if key.startswith("net"):
+                value = config[key]
+                parts = value.split(",")
+                for part in parts:
+                    if part.startswith("virtio="):
+                        mac = part.split("=")[1]
+                        interfaces.append({"id": key, "mac": mac})
+                        break
+        members = [{"@odata.id": f"/redfish/v1/Systems/{vm_id}/EthernetInterfaces/{iface['id']}"} for iface in interfaces]
+        response = {
+            "@odata.id": f"/redfish/v1/Systems/{vm_id}/EthernetInterfaces",
+            "@odata.type": "#EthernetInterfaceCollection.EthernetInterfaceCollection",
+            "Name": "Ethernet Interface Collection",
+            "Description": "Network Interfaces for VM",
+            "Members@odata.count": len(interfaces),
+            "Members": members
+        }
+        return response
+    except Exception as e:
+        return handle_proxmox_error("Ethernet interface collection retrieval", e, vm_id)
+
+
+def get_ethernet_interface_detail(proxmox, vm_id, interface_id):
+    try:
+        config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
+        if interface_id not in config:
+            return {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": f"Interface {interface_id} not found"}}, 404
+
+        value = config[interface_id]
+        mac = None
+        for part in value.split(","):
+            if part.startswith("virtio="):
+                mac = part.split("=")[1]
+                break
+        if not mac:
+            return {"error": {"code": "Base.1.0.GeneralError", "message": "MAC address not found"}}, 500
+
+        response = {
+            "@odata.id": f"/redfish/v1/Systems/{vm_id}/EthernetInterfaces/{interface_id}",
+            "@odata.type": "#EthernetInterface.v1_4_0.EthernetInterface",
+            "Id": interface_id,
+            "Name": f"Ethernet Interface {interface_id}",
+            "Description": f"Network Interface {interface_id}",
+            "PermanentMACAddress": mac,
+            "MACAddress": mac,
+            "SpeedMbps": 1000,  # Static value; Proxmox doesn't provide this
+            "FullDuplex": True,
+            "Status": {
+                "State": "Enabled",
+                "Health": "OK"
+            }
+        }
+        return response
+    except Exception as e:
+        return handle_proxmox_error(f"Ethernet interface detail retrieval for {interface_id}", e, vm_id)
+
+
 def get_vm_status(proxmox, vm_id):
     try:
         status = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).status.current.get()
@@ -726,7 +793,7 @@ def get_vm_status(proxmox, vm_id):
 
         # Map Proxmox status to Redfish PowerState and State
         redfish_status = "Off"
-        state = "Enabled"  # Changed to Enabled for stopped VMs
+        state = "Enabled"  # Default for stopped VMs
         health = "OK"
         if status["status"] == "running":
             redfish_status = "On"
@@ -754,7 +821,7 @@ def get_vm_status(proxmox, vm_id):
         cdrom_info = config.get("ide2", "none")
         cdrom_media = "None" if "none" in cdrom_info else cdrom_info.split(",")[0]
 
-        # Boot configuration
+        # Boot configuration with robust handling
         boot_order = config.get("boot", "")
         boot_target = "None"
         if boot_order:
@@ -830,7 +897,28 @@ def get_vm_status(proxmox, vm_id):
                 "HealthRollup": "OK"
             },
             "Processors": {
-                "@odata.id": f"/redfish/v1/Systems/{vm_id}/Processors"
+                "@odata.id": f"/redfish/v1/Systems/{vm_id}/Processors",
+                "@odata.count": 1,
+                "Members": [
+                    {
+                        "@odata.id": f"/redfish/v1/Systems/{vm_id}/Processors/CPU1",
+                        "@odata.type": "#Processor.v1_3_0.Processor",
+                        "Id": "CPU1",
+                        "Name": "CPU1",
+                        "ProcessorType": "CPU",
+                        "ProcessorArchitecture": processor_architecture,
+                        "InstructionSet": "x86-64",
+                        "Manufacturer": "QEMU",
+                        "Model": cpu_type,
+                        "ProcessorId": {
+                            "VendorID": "QEMU"
+                        },
+                        "Socket": f"CPU {cpu_sockets}",
+                        "TotalCores": cpu_cores,
+                        "TotalThreads": total_threads,
+                        "Status": {"State": "Enabled", "Health": "OK"}
+                    }
+                ]
             },
             "Memory": {
                 "@odata.id": f"/redfish/v1/Systems/{vm_id}/Memory",
@@ -850,6 +938,9 @@ def get_vm_status(proxmox, vm_id):
             "Storage": {
                 "@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage"
             },
+            "EthernetInterfaces": {
+                "@odata.id": f"/redfish/v1/Systems/{vm_id}/EthernetInterfaces"
+            },
             "Boot": {
                 "BootSourceOverrideEnabled": boot_override_enabled,
                 "BootSourceOverrideTarget": boot_target,
@@ -867,15 +958,130 @@ def get_vm_status(proxmox, vm_id):
             "SKU": smbios_data["SKUNumber"],
             "AssetTag": smbios_data["Family"],
             "Bios": {
-                "@odata.id": f"/redfish/v1/Systems/{vm_id}/Bios"
+                "odata.id": f"/redfish/v1/Systems/{vm_id}/Bios"
             }
         }
         return response
     except Exception as e:
         return handle_proxmox_error("Status retrieval", e, vm_id)
 
+
 # Custom request handler
 class RedfishRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        # Log request details
+        headers_str = "\n".join(f"{k}: {v}" for k, v in self.headers.items())
+        logger.debug(f"GET Request: path={self.path}, headers=\n{headers_str}")
+
+        path = self.path.rstrip("/")
+        response = {}
+        status_code = 200
+        self.protocol_version = 'HTTP/1.1'
+
+        valid, message = validate_token(self.headers)
+        if not valid:
+            status_code = 401
+            response = {"error": {"code": "Base.1.0.GeneralError", "message": message}}
+        else:
+            proxmox = get_proxmox_api(self.headers)
+            parts = path.split("/")
+            if path == "/redfish/v1":
+                response = {
+                    "@odata.id": "/redfish/v1",
+                    "@odata.type": "#ServiceRoot.v1_0_0.ServiceRoot",
+                    "Id": "RootService",
+                    "Name": "Redfish Root Service",
+                    "RedfishVersion": "1.0.0",
+                    "Systems": {"@odata.id": "/redfish/v1/Systems"}
+                }
+            elif path == "/redfish/v1/Systems":
+                try:
+                    vm_list = proxmox.nodes(PROXMOX_NODE).qemu.get()
+                    members = [{"@odata.id": f"/redfish/v1/Systems/{vm['vmid']}"} for vm in vm_list]
+                    response = {
+                        "@odata.id": "/redfish/v1/Systems",
+                        "@odata.type": "#SystemCollection.SystemCollection",
+                        "Name": "Systems Collection",
+                        "Members": members,
+                        "Members@odata.count": len(members)
+                    }
+                except Exception as e:
+                    status_code = 500
+                    response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Failed to retrieve VM list: {str(e)}"}}
+            elif path.startswith("/redfish/v1/Systems/"):
+                if len(parts) == 5 and parts[4].isdigit():  # /redfish/v1/Systems/<vm_id>
+                    vm_id = int(parts[4])
+                    response = get_vm_status(proxmox, vm_id)
+                    if isinstance(response, tuple):
+                        response, status_code = response
+                elif len(parts) == 6 and parts[5] == "Processors":  # /redfish/v1/Systems/<vm_id>/Processors
+                    vm_id = int(parts[4])
+                    response = get_processor_collection(proxmox, vm_id)
+                    if isinstance(response, tuple):
+                        response, status_code = response
+                elif len(parts) == 7 and parts[5] == "Processors" and parts[6] == "CPU1":  # /redfish/v1/Systems/<vm_id>/Processors/CPU1
+                    vm_id = int(parts[4])
+                    response = get_processor_detail(proxmox, vm_id, "CPU1")
+                    if isinstance(response, tuple):
+                        response, status_code = response
+                elif len(parts) == 6 and parts[5] == "Storage":  # /redfish/v1/Systems/<vm_id>/Storage
+                    vm_id = int(parts[4])
+                    response = get_storage_collection(proxmox, vm_id)
+                    if isinstance(response, tuple):
+                        response, status_code = response
+                elif len(parts) == 7 and parts[5] == "Storage" and parts[6].isdigit():  # /redfish/v1/Systems/<vm_id>/Storage/<storage_id>
+                    vm_id = int(parts[4])
+                    storage_id = parts[6]
+                    response = get_storage_detail(proxmox, vm_id, storage_id)
+                    if isinstance(response, tuple):
+                        response, status_code = response
+                elif len(parts) == 9 and parts[5] == "Storage" and parts[7] == "Drives":  # /redfish/v1/Systems/<vm_id>/Storage/<storage_id>/Drives/<drive_id>
+                    vm_id = int(parts[4])
+                    storage_id = parts[6]
+                    drive_id = parts[8]
+                    response = get_drive_detail(proxmox, vm_id, storage_id, drive_id)
+                    if isinstance(response, tuple):
+                        response, status_code = response
+                elif len(parts) == 8 and parts[5] == "Storage" and parts[7] == "Volumes":  # /redfish/v1/Systems/<vm_id>/Storage/<storage_id>/Volumes
+                    vm_id = int(parts[4])
+                    storage_id = parts[6]
+                    response = get_volume_collection(proxmox, vm_id, storage_id)
+                    if isinstance(response, tuple):
+                        response, status_code = response
+                elif len(parts) == 8 and parts[5] == "Storage" and parts[7] == "Controllers":  # /redfish/v1/Systems/<vm_id>/Storage/<storage_id>/Controllers
+                    vm_id = int(parts[4])
+                    storage_id = parts[6]
+                    response = get_controller_collection(proxmox, vm_id, storage_id)
+                    if isinstance(response, tuple):
+                        response, status_code = response
+                elif len(parts) == 6 and parts[5] == "EthernetInterfaces":  # /redfish/v1/Systems/<vm_id>/EthernetInterfaces
+                    vm_id = int(parts[4])
+                    response = get_ethernet_interface_collection(proxmox, vm_id)
+                    if isinstance(response, tuple):
+                        response, status_code = response
+                elif len(parts) == 7 and parts[5] == "EthernetInterfaces":  # /redfish/v1/Systems/<vm_id>/EthernetInterfaces/<interface_id>
+                    vm_id = int(parts[4])
+                    interface_id = parts[6]
+                    response = get_ethernet_interface_detail(proxmox, vm_id, interface_id)
+                    if isinstance(response, tuple):
+                        response, status_code = response
+                else:
+                    status_code = 404
+                    response = {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": f"Resource not found: {path}"}}
+            else:
+                status_code = 404
+                response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Resource not found: {path}"}}
+
+        response_body = json.dumps(response).encode('utf-8')
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(response_body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(response_body)
+        logger.debug(f"GET Response: path={self.path}, status={status_code}, body={json.dumps(response)}")
+
+
     def do_POST(self):
         # Log request details
         content_length = int(self.headers.get('Content-Length', 0))
@@ -991,108 +1197,6 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
 
         # Log response
         logger.debug(f"POST Response: path={self.path}, status={status_code}, body={json.dumps(response)}")
-
-    def do_GET(self):
-        # Log request details
-        headers_str = "\n".join(f"{k}: {v}" for k, v in self.headers.items())
-        logger.debug(f"GET Request: path={self.path}, headers=\n{headers_str}")
-
-        path = self.path.rstrip("/")
-        response = {}
-        status_code = 200
-        self.protocol_version = 'HTTP/1.1'
-
-        valid, message = validate_token(self.headers)
-        if not valid:
-            status_code = 401
-            response = {"error": {"code": "Base.1.0.GeneralError", "message": message}}
-        else:
-            proxmox = get_proxmox_api(self.headers)
-            parts = path.split("/")
-            if path == "/redfish/v1":
-                response = {
-                    "@odata.id": "/redfish/v1",
-                    "@odata.type": "#ServiceRoot.v1_0_0.ServiceRoot",
-                    "Id": "RootService",
-                    "Name": "Redfish Root Service",
-                    "RedfishVersion": "1.0.0",
-                    "Systems": {"@odata.id": "/redfish/v1/Systems"}
-                }
-            elif path == "/redfish/v1/Systems":
-                try:
-                    vm_list = proxmox.nodes(PROXMOX_NODE).qemu.get()
-                    members = [{"@odata.id": f"/redfish/v1/Systems/{vm['vmid']}"} for vm in vm_list]
-                    response = {
-                        "@odata.id": "/redfish/v1/Systems",
-                        "@odata.type": "#SystemCollection.SystemCollection",
-                        "Name": "Systems Collection",
-                        "Members": members,
-                        "Members@odata.count": len(members)
-                    }
-                except Exception as e:
-                    status_code = 500
-                    response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Failed to retrieve VM list: {str(e)}"}}
-            elif path.startswith("/redfish/v1/Systems/"):
-                if len(parts) == 5 and parts[4].isdigit():  # /redfish/v1/Systems/<vm_id>
-                    vm_id = int(parts[4])
-                    response = get_vm_status(proxmox, vm_id)
-                    if isinstance(response, tuple):
-                        response, status_code = response
-                elif len(parts) == 6 and parts[5] == "Processors":  # /redfish/v1/Systems/<vm_id>/Processors
-                    vm_id = int(parts[4])
-                    response = get_processor_collection(proxmox, vm_id)
-                    if isinstance(response, tuple):
-                        response, status_code = response
-                elif len(parts) == 7 and parts[5] == "Processors" and parts[6] == "CPU1":  # /redfish/v1/Systems/<vm_id>/Processors/CPU1
-                    vm_id = int(parts[4])
-                    response = get_processor_detail(proxmox, vm_id, "CPU1")
-                    if isinstance(response, tuple):
-                        response, status_code = response
-                elif len(parts) == 6 and parts[5] == "Storage":  # /redfish/v1/Systems/<vm_id>/Storage
-                    vm_id = int(parts[4])
-                    response = get_storage_collection(proxmox, vm_id)
-                    if isinstance(response, tuple):
-                        response, status_code = response
-                elif len(parts) == 7 and parts[5] == "Storage" and parts[6].isdigit():  # /redfish/v1/Systems/<vm_id>/Storage/<storage_id>
-                    vm_id = int(parts[4])
-                    storage_id = parts[6]
-                    response = get_storage_detail(proxmox, vm_id, storage_id)
-                    if isinstance(response, tuple):
-                        response, status_code = response
-                elif len(parts) == 9 and parts[5] == "Storage" and parts[7] == "Drives":  # /redfish/v1/Systems/<vm_id>/Storage/<storage_id>/Drives/<drive_id>
-                    vm_id = int(parts[4])
-                    storage_id = parts[6]
-                    drive_id = parts[8]
-                    response = get_drive_detail(proxmox, vm_id, storage_id, drive_id)
-                    if isinstance(response, tuple):
-                        response, status_code = response
-                elif len(parts) == 8 and parts[5] == "Storage" and parts[7] == "Volumes":  # /redfish/v1/Systems/<vm_id>/Storage/<storage_id>/Volumes
-                    vm_id = int(parts[4])
-                    storage_id = parts[6]
-                    response = get_volume_collection(proxmox, vm_id, storage_id)
-                    if isinstance(response, tuple):
-                        response, status_code = response
-                elif len(parts) == 8 and parts[5] == "Storage" and parts[7] == "Controllers":  # /redfish/v1/Systems/<vm_id>/Storage/<storage_id>/Controllers
-                    vm_id = int(parts[4])
-                    storage_id = parts[6]
-                    response = get_controller_collection(proxmox, vm_id, storage_id)
-                    if isinstance(response, tuple):
-                        response, status_code = response
-                else:
-                    status_code = 404
-                    response = {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": f"Resource not found: {path}"}}
-            else:
-                status_code = 404
-                response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Resource not found: {path}"}}
-
-        response_body = json.dumps(response).encode('utf-8')
-        self.send_response(status_code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(response_body)))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(response_body)
-        logger.debug(f"GET Response: path={self.path}, status={status_code}, body={json.dumps(response)}")
 
 
     def do_PATCH(self):
