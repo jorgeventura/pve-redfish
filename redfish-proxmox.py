@@ -387,16 +387,15 @@ def reorder_boot_order(proxmox, vm_id, current_order, target):
     unique_devices = list(dict.fromkeys(new_order))
     return ";".join(unique_devices) if unique_devices else ""
 
-
 def get_vm_status(proxmox, vm_id):
     try:
         status = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).status.current.get()
         config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
 
-        # Assume status["status"] contains Proxmox state: "running", "paused", "stopped", etc.
-        redfish_status = "Off"  # Default PowerState
-        state = "Disabled"  # Default State
-        health = "OK"  # Default Health
+        # Map Proxmox status to Redfish PowerState and State
+        redfish_status = "Off"
+        state = "Disabled"
+        health = "OK"
         if status["status"] == "running":
             redfish_status = "On"
             state = "Enabled"
@@ -411,6 +410,7 @@ def get_vm_status(proxmox, vm_id):
             state = "Absent"
             health = "Critical"
 
+        # Memory conversion
         memory_mb = config.get("memory", 0)
         try:
             memory_mb = float(memory_mb)
@@ -418,27 +418,40 @@ def get_vm_status(proxmox, vm_id):
             memory_mb = 0
         memory_gib = memory_mb / 1024.0
 
+        # CDROM info
         cdrom_info = config.get("ide2", "none")
         cdrom_media = "None" if "none" in cdrom_info else cdrom_info.split(",")[0]
 
-        boot_order = config.get("boot", "order=scsi0;ide2;net0")
-        boot_target = "Pxe"
-        if "net" in boot_order and boot_order.index("net") < boot_order.index(";"):
-            boot_target = "Pxe"
-        elif "ide2" in boot_order and boot_order.index("ide2") < boot_order.index(";"):
-            boot_target = "Cd"
-        elif "scsi" in boot_order and boot_order.index("scsi") < boot_order.index(";"):
-            boot_target = "Hdd"
+        # Boot configuration with robust handling
+        boot_order = config.get("boot", "")
+        boot_target = "None"
+        if boot_order:
+            # Remove "order=" prefix if present
+            if boot_order.startswith("order="):
+                boot_order = boot_order[len("order="):]
+            # Split by semicolon, handle single device case
+            devices = boot_order.split(";") if ";" in boot_order else [boot_order]
+            # Map first valid device to Redfish target
+            for device in devices:
+                if device.startswith("net"):
+                    boot_target = "Pxe"
+                    break
+                elif device == "ide2":
+                    boot_target = "Cd"
+                    break
+                elif device.startswith(("scsi", "sata", "ide")) and "media=cdrom" not in config.get(device, ""):
+                    boot_target = "Hdd"
+                    break
         boot_override_enabled = "Enabled" if redfish_status == "Off" else "Disabled"
 
-        # Extract and decode SMBIOS Type 1 data
+        # SMBIOS Type 1 data
         smbios1 = config.get("smbios1", "")
         smbios_data = {
-            "UUID": config.get("smbios1", "").split("uuid=")[1].split(",")[0] if "uuid=" in config.get("smbios1", "") else f"proxmox-vm-{vm_id}",
+            "UUID": config.get("smbios1", "").split("uuid=")[1].split(",")[0] if "uuid=" in smbios1 else f"proxmox-vm-{vm_id}",
             "Manufacturer": "Proxmox",
             "ProductName": "QEMU Virtual Machine",
             "Version": None,
-            "SerialNumber": config.get("smbios1", "").split("serial=")[1].split(",")[0] if "serial=" in config.get("smbios1", "") else f"serial-vm-{vm_id}",
+            "SerialNumber": config.get("smbios1", "").split("serial=")[1].split(",")[0] if "serial=" in smbios1 else f"serial-vm-{vm_id}",
             "SKUNumber": None,
             "Family": None
         }
@@ -447,14 +460,12 @@ def get_vm_status(proxmox, vm_id):
             for entry in smbios_entries:
                 if "=" in entry:
                     key, value = entry.split("=", 1)
-                    # Decode Base64 if applicable
                     try:
                         decoded_value = base64.b64decode(value).decode("utf-8")
-                        if decoded_value.isprintable():  # Ensure it’s valid text
+                        if decoded_value.isprintable():
                             value = decoded_value
                     except (base64.binascii.Error, UnicodeDecodeError):
-                        pass  # Use original value if decoding fails
-
+                        pass
                     if key == "uuid":
                         smbios_data["UUID"] = value
                     elif key == "manufacturer":
@@ -470,6 +481,12 @@ def get_vm_status(proxmox, vm_id):
                     elif key == "family":
                         smbios_data["Family"] = value
 
+        # Processor information using proxmoxer
+        cpu_cores = config.get("cores", 1)
+        cpu_sockets = config.get("sockets", 1)
+        cpu_type = config.get("cpu", "kvm64")
+        processor_architecture = "x86" if "kvm64" in cpu_type or "host" in cpu_type else "unknown"
+
         response = {
             "@odata.id": f"/redfish/v1/Systems/{vm_id}",
             "@odata.type": "#ComputerSystem.v1_13_0.ComputerSystem",
@@ -484,7 +501,7 @@ def get_vm_status(proxmox, vm_id):
             },
             "Processors": {
                 "@odata.id": f"/redfish/v1/Systems/{vm_id}/Processors",
-                "Count": config.get("cores", 0),
+                "@odata.count": 1,
                 "Members": [
                     {
                         "@odata.id": f"/redfish/v1/Systems/{vm_id}/Processors/0",
@@ -492,7 +509,9 @@ def get_vm_status(proxmox, vm_id):
                         "Id": "0",
                         "Name": "CPU 0",
                         "ProcessorType": "CPU",
-                        "TotalCores": config.get("cores", 0),
+                        "TotalCores": cpu_cores,
+                        "ProcessorArchitecture": processor_architecture,
+                        "Socket": f"Socket-{cpu_sockets}",
                         "Status": {"State": "Enabled", "Health": "OK"}
                     }
                 ]
@@ -506,7 +525,7 @@ def get_vm_status(proxmox, vm_id):
                         "@odata.type": "#Memory.v1_0_0.Memory",
                         "Id": "0",
                         "Name": "Memory 0",
-                        "CapacityMiB": config.get("memory", 0),
+                        "CapacityMiB": memory_mb,
                         "MemoryType": "DRAM",
                         "Status": {"State": "Enabled", "Health": "OK"}
                     }
