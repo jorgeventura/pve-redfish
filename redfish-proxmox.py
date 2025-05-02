@@ -23,10 +23,10 @@ logger = logging.getLogger('redfish-proxmox')
 logger.setLevel(logging.DEBUG)
 
 # Proxmox configuration (replace with your actual values)
-PROXMOX_HOST = "localhost"
-PROXMOX_USER = "user_with_access"       # Only required if using --Auth None
-PROXMOX_PASSWORD = "user_passwd"        # the same here
-PROXMOX_NODE = "pve-m5"
+PROXMOX_HOST = "Li-MA-IFCP-PM.pptlabnet.com"
+PROXMOX_USER = "ventura@pve"       # Only required if using --Auth None
+PROXMOX_PASSWORD = "att42924"        # the same here
+PROXMOX_NODE = "Li-MA-IFCP-PM"
 VERIFY_SSL = False
 
 # Options
@@ -387,6 +387,7 @@ def reorder_boot_order(proxmox, vm_id, current_order, target):
     unique_devices = list(dict.fromkeys(new_order))
     return ";".join(unique_devices) if unique_devices else ""
 
+
 def get_vm_status(proxmox, vm_id):
     try:
         status = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).status.current.get()
@@ -474,8 +475,6 @@ def get_vm_status(proxmox, vm_id):
                         smbios_data["ProductName"] = value
                     elif key == "version":
                         smbios_data["Version"] = value
-                    elif key == "serial":
-                        smbios_data["SerialNumber"] = value
                     elif key == "sku":
                         smbios_data["SKUNumber"] = value
                     elif key == "family":
@@ -486,6 +485,7 @@ def get_vm_status(proxmox, vm_id):
         cpu_sockets = config.get("sockets", 1)
         cpu_type = config.get("cpu", "kvm64")
         processor_architecture = "x86" if "kvm64" in cpu_type or "host" in cpu_type else "unknown"
+        total_threads = config.get("vcpus", cpu_cores)  # Assume vcpus = threads, fallback to cores
 
         response = {
             "@odata.id": f"/redfish/v1/Systems/{vm_id}",
@@ -504,14 +504,21 @@ def get_vm_status(proxmox, vm_id):
                 "@odata.count": 1,
                 "Members": [
                     {
-                        "@odata.id": f"/redfish/v1/Systems/{vm_id}/Processors/0",
-                        "@odata.type": "#Processor.v1_0_0.Processor",
-                        "Id": "0",
-                        "Name": "CPU 0",
+                        "@odata.id": f"/redfish/v1/Systems/{vm_id}/Processors/CPU1",
+                        "@odata.type": "#Processor.v1_3_0.Processor",
+                        "Id": "CPU1",
+                        "Name": "CPU1",
                         "ProcessorType": "CPU",
-                        "TotalCores": cpu_cores,
                         "ProcessorArchitecture": processor_architecture,
-                        "Socket": f"Socket-{cpu_sockets}",
+                        "InstructionSet": "x86-64",
+                        "Manufacturer": "QEMU",
+                        "Model": cpu_type,
+                        "ProcessorId": {
+                            "VendorID": "QEMU"
+                        },
+                        "Socket": f"CPU {cpu_sockets}",
+                        "TotalCores": cpu_cores,
+                        "TotalThreads": total_threads,
                         "Status": {"State": "Enabled", "Health": "OK"}
                     }
                 ]
@@ -574,6 +581,9 @@ def get_vm_status(proxmox, vm_id):
         return response
     except Exception as e:
         return handle_proxmox_error("Status retrieval", e, vm_id)
+
+
+
 
 
 def get_bios(proxmox, vm_id):
