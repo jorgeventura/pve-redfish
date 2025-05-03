@@ -1067,9 +1067,10 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                     response = get_processor_collection(proxmox, vm_id)
                     if isinstance(response, tuple):
                         response, status_code = response
-                elif len(parts) == 7 and parts[5] == "Processors" and parts[6] == "CPU1":  # /redfish/v1/Systems/<vm_id>/Processors/CPU1
+                elif len(parts) == 7 and parts[5] == "Processors":  # /redfish/v1/Systems/<vm_id>/Processors/<processor_id>
                     vm_id = int(parts[4])
-                    response = get_processor_detail(proxmox, vm_id, "CPU1")
+                    processor_id = parts[6]
+                    response = get_processor_detail(proxmox, vm_id, processor_id)
                     if isinstance(response, tuple):
                         response, status_code = response
                 elif len(parts) == 6 and parts[5] == "Storage":  # /redfish/v1/Systems/<vm_id>/Storage
