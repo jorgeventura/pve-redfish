@@ -535,21 +535,23 @@ def validate_token(headers):
                 return False, "Token expired"
     return False, "Invalid or no token provided"
 
+
 def get_processor_collection(proxmox, vm_id):
     try:
-        # For simplicity, assume one processor per VM
+        config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
+        cpu_sockets = config.get("sockets", 1)
+        members = [{"@odata.id": f"/redfish/v1/Systems/{vm_id}/Processors/CPU{i+1}"} for i in range(cpu_sockets)]
         response = {
             "@odata.id": f"/redfish/v1/Systems/{vm_id}/Processors",
             "@odata.type": "#ProcessorCollection.ProcessorCollection",
             "Name": "Processors Collection",
-            "Members@odata.count": 1,
-            "Members": [
-                {"@odata.id": f"/redfish/v1/Systems/{vm_id}/Processors/CPU1"}
-            ]
+            "Members@odata.count": cpu_sockets,
+            "Members": members
         }
         return response
     except Exception as e:
         return handle_proxmox_error("Processor collection retrieval", e, vm_id)
+
 
 def get_processor_detail(proxmox, vm_id, processor_id):
     try:
@@ -560,14 +562,26 @@ def get_processor_detail(proxmox, vm_id, processor_id):
         processor_architecture = "x86" if "kvm64" in cpu_type or "host" in cpu_type else "unknown"
         total_threads = config.get("vcpus", cpu_cores)
 
-        if processor_id != "CPU1":
+        # Validate processor_id (e.g., "CPU1", "CPU2")
+        if not processor_id.startswith("CPU") or not processor_id[3:].isdigit():
+            return {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": f"Invalid processor ID: {processor_id}"}}, 404
+        cpu_index = int(processor_id[3:]) - 1  # CPU1 -> index 0, CPU2 -> index 1
+        if cpu_index < 0 or cpu_index >= cpu_sockets:
             return {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": f"Processor {processor_id} not found"}}, 404
 
+        # Distribute cores and threads across sockets
+        cores_per_socket = cpu_cores // cpu_sockets
+        threads_per_socket = total_threads // cpu_sockets
+        # Handle remainder cores/threads by assigning to the first socket
+        if cpu_index == 0:
+            cores_per_socket += cpu_cores % cpu_sockets
+            threads_per_socket += total_threads % cpu_sockets
+
         response = {
-            "@odata.id": f"/redfish/v1/Systems/{vm_id}/Processors/CPU1",
+            "@odata.id": f"/redfish/v1/Systems/{vm_id}/Processors/{processor_id}",
             "@odata.type": "#Processor.v1_3_0.Processor",
-            "Id": "CPU1",
-            "Name": "CPU1",
+            "Id": processor_id,
+            "Name": processor_id,
             "ProcessorType": "CPU",
             "ProcessorArchitecture": processor_architecture,
             "InstructionSet": "x86-64",
@@ -576,14 +590,15 @@ def get_processor_detail(proxmox, vm_id, processor_id):
             "ProcessorId": {
                 "VendorID": "QEMU"
             },
-            "Socket": f"CPU {cpu_sockets}",
-            "TotalCores": cpu_cores,
-            "TotalThreads": total_threads,
+            "Socket": f"Socket {cpu_index}",
+            "TotalCores": cores_per_socket,
+            "TotalThreads": threads_per_socket,
             "Status": {"State": "Enabled", "Health": "OK"}
         }
         return response
     except Exception as e:
         return handle_proxmox_error(f"Processor detail retrieval for {processor_id}", e, vm_id)
+
 
 def get_storage_collection(proxmox, vm_id):
     try:
@@ -600,6 +615,40 @@ def get_storage_collection(proxmox, vm_id):
     except Exception as e:
         return handle_proxmox_error("Storage collection retrieval", e, vm_id)
 
+
+def parse_disk_size(drive_info):
+    """
+    Parse disk size from Proxmox config string (e.g., 'size=16G') and convert to bytes.
+    
+    Args:
+        drive_info (str): Disk config string (e.g., 'Datastore1_local_RAIDZ:vm-302-disk-1,iothread=1,size=16G')
+    
+    Returns:
+        int: Size in bytes, or 0 if parsing fails
+    """
+    try:
+        # Split by commas and find size parameter
+        parts = drive_info.split(",")
+        size_part = next((part for part in parts if part.startswith("size=")), None)
+        if not size_part:
+            return 0
+
+        # Extract size value and unit (e.g., '16G' -> '16', 'G')
+        size_str = size_part.split("=")[1]
+        unit = size_str[-1].upper()
+        size_value = float(size_str[:-1])
+
+        # Convert to bytes
+        if unit == "G":
+            return int(size_value * 1024 * 1024 * 1024)  # Gigabytes to bytes
+        elif unit == "M":
+            return int(size_value * 1024 * 1024)  # Megabytes to bytes
+        elif unit == "T":
+            return int(size_value * 1024 * 1024 * 1024 * 1024)  # Terabytes to bytes
+        else:
+            return 0  # Unknown unit
+    except (ValueError, IndexError):
+        return 0  # Parsing failed
 
 def get_storage_detail(proxmox, vm_id, storage_id):
     try:
@@ -655,7 +704,6 @@ def get_storage_detail(proxmox, vm_id, storage_id):
     except Exception as e:
         return handle_proxmox_error(f"Storage detail retrieval for {storage_id}", e, vm_id)
 
-
 def get_drive_detail(proxmox, vm_id, storage_id, drive_id):
     try:
         if storage_id != "1":
@@ -668,7 +716,7 @@ def get_drive_detail(proxmox, vm_id, storage_id, drive_id):
         drive_info = config[drive_id]
         is_cdrom = "media=cdrom" in drive_info
         media_type = "CDROM" if is_cdrom else "HDD"
-        capacity_bytes = 0  # Size not retrievable via proxmoxer; defaults to 0
+        capacity_bytes = parse_disk_size(drive_info) if not is_cdrom else 0  # CDROMs have no capacity
 
         response = {
             "@odata.id": f"/redfish/v1/Systems/{vm_id}/Storage/1/Drives/{drive_id}",
