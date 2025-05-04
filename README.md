@@ -254,24 +254,34 @@ The code covers the following Redfish endpoints and functionalities:
 
 1.  **Service Root (/redfish/v1/)**:
     -   Provides the entry point to the Redfish service with links to other resources (e.g., Systems).
+
 2.  **Systems Collection (/redfish/v1/Systems)**:
     -   Lists all VMs as Redfish "Systems" with their VM IDs.
+
 3.  **System Resource (/redfish/v1/Systems/{vm\_id})**:
     -   Retrieves detailed VM status and configuration (e.g., power state, memory, CPU, CDROM).
+
 4.  **Custom Config Endpoint (/redfish/v1/Systems/{vm\_id}/Config)**:
     -   Non-standard endpoint for retrieving VM configuration details.
+
 5.  **Reset Action (/redfish/v1/Systems/{vm\_id}/Actions/ComputerSystem.Reset)**:
     -   Supports power operations: On, ForceOff, ForceRestart, Pause, Resume, ForceStop.
+
 6.  **Mount ISO Action (/redfish/v1/Systems/{vm\_id}/Actions/ComputerSystem.MountISO)**:
     -   Custom action to mount or eject virtual CD media.
+
 7.  **Update Config Action (/redfish/v1/Systems/{vm\_id}/Actions/ComputerSystem.UpdateConfig)**:
     -   Custom action to update VM configuration.
+
 8.  **Session Service (/redfish/v1/SessionService/Sessions)**:
     -   Implements session-based authentication when AUTH == "Session".
+
 9.  **Processors (/redfish/v1/Systems/{vm\_id}/Processors)**:
     -   Collect processors information
+
 10.  **Storage (/redfish/v1/Systems/{vm\_id}/Storage)**:
     -   Collect Storage information
+
 11.  **Ethernet interfaces (/redfish/v1/Systems/{vm\_id}/EthernetInterfaces)**:
     -   Collect ethernet information
 
