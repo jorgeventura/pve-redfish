@@ -330,12 +330,16 @@ def reorder_boot_order(proxmox, vm_id, current_order, target):
         target (str): Redfish BootSourceOverrideTarget ("Pxe", "Cd", "Hdd").
     
     Returns:
-        str: New boot order (e.g., "scsi0;ide0;ide2;net0"), or an empty string if no devices match.
+        str: New boot order (e.g., "scsi0;ide0;ide2;net0"), or raises an exception if the target is not available.
+    
+    Raises:
+        ValueError: If the requested boot device is not available.
     """
-    # Fetch VM configuration
+    logger.debug(f"Reordering boot for VM {vm_id}, target: {target}, current order: {current_order}")
     try:
         config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
     except Exception as e:
+        logger.error(f"Failed to get VM {vm_id} config: {str(e)}")
         config = {}  # Fallback to empty config if retrieval fails
 
     # Split current order into devices; handle empty or unset cases
@@ -373,6 +377,14 @@ def reorder_boot_order(proxmox, vm_id, current_order, target):
         if dev and dev not in available_devs:
             available_devs.append(dev)
 
+    # Validate the target device availability
+    if target == "Pxe" and not net_dev:
+        raise ValueError("No network device available for Pxe boot")
+    elif target == "Cd" and not cd_dev:
+        raise ValueError("No CD-ROM device available for Cd boot")
+    elif target == "Hdd" and not disk_devs:
+        raise ValueError("No hard disk device available for Hdd boot")
+
     # Reorder based on target, keeping all devices
     new_order = []
     if target == "Pxe" and net_dev:
@@ -380,16 +392,17 @@ def reorder_boot_order(proxmox, vm_id, current_order, target):
     elif target == "Cd" and cd_dev:
         new_order = [cd_dev] + [d for d in available_devs if d != cd_dev]
     elif target == "Hdd" and disk_devs:
-        # Prioritize the first hard drive (e.g., scsi0), then include others
         primary_disk = disk_devs[0]
         new_order = [primary_disk] + [d for d in available_devs if d != primary_disk]
     else:
-        # Fallback: keep the existing order or use all available devices
+        # This should not be reached due to earlier validation
         new_order = available_devs
 
     # Remove duplicates and ensure valid devices only
     unique_devices = list(dict.fromkeys(new_order))
-    return ";".join(unique_devices) if unique_devices else ""
+    result = ";".join(unique_devices) if unique_devices else ""
+    logger.debug(f"Computed new boot order for VM {vm_id}: {result}")
+    return result
 
 
 def get_bios(proxmox, vm_id):
@@ -1262,7 +1275,6 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
         # Log request details
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
-
         try:
             post_data_str = post_data.decode('utf-8')
             try:
@@ -1275,86 +1287,183 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
         headers_str = "\n".join(f"{k}: {v}" for k, v in self.headers.items())
         logger.debug(f"PATCH Request: path={self.path}\nHeaders:\n{headers_str}\nPayload:\n{json.dumps(payload, indent=2)}")
 
-        content_length = int(self.headers.get('Content-Length', 0))
-        post_data = self.rfile.read(content_length)
         path = self.path.rstrip("/")
         response = {}
         status_code = 200
         self.protocol_version = 'HTTP/1.1'
 
+        logger.debug(f"Processing PATCH request for path: {path}")
+
         valid, message = validate_token(self.headers)
         if not valid:
+            logger.error(f"Authentication failed: {message}")
             status_code = 401
             response = {"error": {"code": "Base.1.0.GeneralError", "message": message}}
         else:
-            proxmox = get_proxmox_api(self.headers)
+            try:
+                proxmox = get_proxmox_api(self.headers)
+                logger.debug(f"Proxmox API connection established for VM operation")
+            except Exception as e:
+                logger.error(f"Failed to get Proxmox API: {str(e)}")
+                status_code = 500
+                response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Failed to connect to Proxmox API: {str(e)}"}}
+                response_body = json.dumps(response).encode('utf-8')
+                self.send_response(status_code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response_body)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(response_body)
+                logger.debug(f"PATCH Response: path={self.path}, status={status_code}, body={json.dumps(response)}")
+                return
+
             if path.startswith("/redfish/v1/Systems/") and len(path.split("/")) == 5:
                 vm_id = path.split("/")[4]
+                logger.debug(f"Processing boot configuration for VM {vm_id}")
                 try:
                     data = json.loads(post_data.decode('utf-8'))
+                    logger.debug(f"Parsed payload: {json.dumps(data, indent=2)}")
                     if "Boot" in data:
                         boot_data = data["Boot"]
                         target = boot_data.get("BootSourceOverrideTarget")
                         enabled = boot_data.get("BootSourceOverrideEnabled", "Once")
+                        logger.debug(f"Boot parameters: target={target}, enabled={enabled}")
 
                         if target not in ["Pxe", "Cd", "Hdd"]:
+                            logger.error(f"Invalid BootSourceOverrideTarget: {target}")
                             status_code = 400
-                            response = {"error": {"code": "Base.1.0.InvalidRequest", "message": f"Unsupported BootSourceOverrideTarget: {target}"}}
+                            response = {
+                                "error": {
+                                    "code": "Base.1.0.InvalidRequest",
+                                    "message": f"Unsupported BootSourceOverrideTarget: {target}",
+                                    "@Message.ExtendedInfo": [
+                                        {
+                                            "MessageId": "Base.1.0.PropertyValueNotInList",
+                                            "Message": f"The value '{target}' for BootSourceOverrideTarget is not in the supported list: Pxe, Cd, Hdd.",
+                                            "MessageArgs": [target],
+                                            "Severity": "Warning",
+                                            "Resolution": "Select a supported boot device from BootSourceOverrideSupported."
+                                        }
+                                    ]
+                                }
+                            }
                         elif enabled not in ["Once", "Continuous", "Disabled"]:
+                            logger.error(f"Invalid BootSourceOverrideEnabled: {enabled}")
                             status_code = 400
-                            response = {"error": {"code": "Base.1.0.InvalidRequest", "message": f"Unsupported BootSourceOverrideEnabled: {enabled}"}}
+                            response = {
+                                "error": {
+                                    "code": "Base.1.0.InvalidRequest",
+                                    "message": f"Unsupported BootSourceOverrideEnabled: {enabled}",
+                                    "@Message.ExtendedInfo": [
+                                        {
+                                            "MessageId": "Base.1.0.PropertyValueNotInList",
+                                            "Message": f"The value '{enabled}' for BootSourceOverrideEnabled is not in the supported list: Once, Continuous, Disabled.",
+                                            "MessageArgs": [enabled],
+                                            "Severity": "Warning",
+                                            "Resolution": "Select a supported value for BootSourceOverrideEnabled."
+                                        }
+                                    ]
+                                }
+                            }
                         else:
                             # Check the VM's current power state
-                            status = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).status.current.get()
+                            logger.debug(f"Checking power state for VM {vm_id}")
+                            try:
+                                status = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).status.current.get()
+                                logger.debug(f"VM {vm_id} status: {status['status']}")
+                            except Exception as e:
+                                logger.error(f"Failed to get VM {vm_id} status: {str(e)}")
+                                status_code = 500
+                                response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Failed to get VM status: {str(e)}"}}
+                                response_body = json.dumps(response).encode('utf-8')
+                                self.send_response(status_code)
+                                self.send_header("Content-Type", "application/json")
+                                self.send_header("Content-Length", str(len(response_body)))
+                                self.send_header("Connection", "close")
+                                self.end_headers()
+                                self.wfile.write(response_body)
+                                logger.debug(f"PATCH Response: path={self.path}, status={status_code}, body={json.dumps(response)}")
+                                return
+
                             redfish_status = {
                                 "running": "On",
                                 "stopped": "Off",
                                 "paused": "Paused",
                                 "shutdown": "Off"
                             }.get(status["status"], "Unknown")
+                            logger.debug(f"VM {vm_id} redfish_status: {redfish_status}")
 
-                            # If VM is not Off, reject the boot order change
                             if redfish_status != "Off":
-                                status_code = 400  # Bad Request
+                                logger.error(f"Cannot modify boot configuration for VM {vm_id}: VM is {redfish_status}")
+                                status_code = 400
                                 response = {
                                     "error": {
                                         "code": "Base.1.0.ActionNotSupported",
                                         "message": f"Cannot modify boot configuration while VM {vm_id} is {redfish_status}. BootSourceOverrideEnabled is Disabled.",
-                                        "@Message.ExtendedInfo": [{
-                                            "MessageId": "Base.1.0.ActionNotSupported",
-                                            "Message": "The action to modify the boot order is not supported while the system is powered on or in a paused state. Power off the system and try again.",
-                                            "MessageArgs": ["Boot order modification", redfish_status],
-                                            "Severity": "Warning",
-                                            "Resolution": "Power off the system using a Reset action (e.g., ForceOff) and retry the operation."
-                                        }]
+                                        "@Message.ExtendedInfo": [
+                                            {
+                                                "MessageId": "Base.1.0.ActionNotSupported",
+                                                "Message": "The action to modify the boot order is not supported while the system is powered on or in a paused state. Power off the system and try again.",
+                                                "MessageArgs": ["Boot order modification", redfish_status],
+                                                "Severity": "Warning",
+                                                "Resolution": "Power off the system using a Reset action (e.g., ForceOff) and retry the operation."
+                                            }
+                                        ]
                                     }
                                 }
                             else:
-                                # Proceed with boot order change if VM is Off
-                                config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
-                                current_boot = config.get("boot", "")
-                                new_boot_order = reorder_boot_order(proxmox, int(vm_id), current_boot, target)
-                                config_data = {"boot": f"order={new_boot_order}" if new_boot_order else ""}
-                                task = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.set(**config_data)
-                                response = {
-                                    "@odata.id": f"/redfish/v1/TaskService/Tasks/{task}",
-                                    "@odata.type": "#Task.v1_0_0.Task",
-                                    "Id": task,
-                                    "Name": f"Set Boot Order for VM {vm_id}",
-                                    "TaskState": "Running",
-                                    "TaskStatus": "OK",
-                                    "Messages": [{"Message": f"Boot order set to {target} ({new_boot_order}) for VM {vm_id}"}]
-                                }
-                                status_code = 202
+                                # Proceed with boot order change
+                                logger.debug(f"VM {vm_id} is Off, proceeding with boot order change to {target}")
+                                try:
+                                    config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
+                                    current_boot = config.get("boot", "")
+                                    logger.debug(f"Current boot order: {current_boot}")
+                                    new_boot_order = reorder_boot_order(proxmox, int(vm_id), current_boot, target)
+                                    logger.debug(f"New boot order: {new_boot_order}")
+                                    config_data = {"boot": f"order={new_boot_order}" if new_boot_order else ""}
+                                    task = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.set(**config_data)
+                                    logger.debug(f"Boot order update task initiated: {task}")
+                                    response = {
+                                        "@odata.id": f"/redfish/v1/TaskService/Tasks/{task}",
+                                        "@odata.type": "#Task.v1_0_0.Task",
+                                        "Id": task,
+                                        "Name": f"Set Boot Order for VM {vm_id}",
+                                        "TaskState": "Running",
+                                        "TaskStatus": "OK",
+                                        "Messages": [{"Message": f"Boot order set to {target} ({new_boot_order}) for VM {vm_id}"}]
+                                    }
+                                    status_code = 202
+                                except ValueError as e:
+                                    logger.error(f"Failed to set boot order for VM {vm_id}: {str(e)}")
+                                    status_code = 400
+                                    response = {
+                                        "error": {
+                                            "code": "Base.1.0.ActionNotSupported",
+                                            "message": f"Cannot set BootSourceOverrideTarget to {target}: {str(e)}",
+                                            "@Message.ExtendedInfo": [
+                                                {
+                                                    "MessageId": "Base.1.0.ActionNotSupported",
+                                                    "Message": f"The requested boot device '{target}' is not available. Available boot devices are: Pxe, Cd.",
+                                                    "MessageArgs": [target],
+                                                    "Severity": "Warning",
+                                                    "Resolution": "Select a supported boot device from BootSourceOverrideSupported or verify the VM configuration."
+                                                }
+                                            ]
+                                        }
+                                    }
+                                except Exception as e:
+                                    logger.error(f"Failed to set boot order for VM {vm_id}: {str(e)}")
+                                    response, status_code = handle_proxmox_error("Boot configuration", e, vm_id)
                     else:
+                        logger.error("Boot object required in PATCH request")
                         status_code = 400
                         response = {"error": {"code": "Base.1.0.InvalidRequest", "message": "Boot object required in PATCH request"}}
                 except json.JSONDecodeError:
+                    logger.error("Invalid JSON payload")
                     status_code = 400
                     response = {"error": {"code": "Base.1.0.GeneralError", "message": "Invalid JSON payload"}}
-                except Exception as e:
-                    response, status_code = handle_proxmox_error("Boot configuration", e, vm_id)
             else:
+                logger.error(f"Resource not found: {path}")
                 status_code = 404
                 response = {"error": {"code": "Base.1.0.ResourceMissingAtURI", "message": f"Resource not found: {path}"}}
 
@@ -1367,7 +1476,6 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(response_body)
 
-        # Log response
         logger.debug(f"PATCH Response: path={self.path}, status={status_code}, body={json.dumps(response)}")
 
 
