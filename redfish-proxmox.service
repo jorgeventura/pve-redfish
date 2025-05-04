@@ -7,6 +7,7 @@ Environment="PROXMOX_HOST="
 Environment="PROXMOX_USER="
 Environment="PROXMOX_PASSWORD="
 Environment="PROXMOX_NODE="
+Environment="REDFISH_LOGGING_ENABLED=False"
 ExecStart=/opt/redfish_daemon/venv/bin/python /opt/redfish_daemon/redfish-proxmox.py -A None
 WorkingDirectory=/opt/redfish_daemon
 Restart=always

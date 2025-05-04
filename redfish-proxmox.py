@@ -14,20 +14,24 @@ import logging
 from logging.handlers import SysLogHandler
 
 # Configure logging to send to system journal
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s %(levelname)s: %(message)s',
-    handlers=[SysLogHandler(address='/dev/log')]
-)
 logger = logging.getLogger('redfish-proxmox')
-logger.setLevel(logging.DEBUG)
+logging_enabled = os.getenv("REDFISH_LOGGING_ENABLED", "true").lower() == "true"
+if logging_enabled:
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s %(levelname)s: %(message)s',
+        handlers=[SysLogHandler(address='/dev/log')]
+    )
+    logger.setLevel(logging.DEBUG)
+else:
+    logger.handlers = [logging.NullHandler()]
 
 # Proxmox configuration from environment variables with fallbacks
 PROXMOX_HOST = os.getenv("PROXMOX_HOST", "pve-node-hostname")
 PROXMOX_USER = os.getenv("PROXMOX_USER", "username")
 PROXMOX_PASSWORD = os.getenv("PROXMOX_PASSWORD", "password")
 PROXMOX_NODE = os.getenv("PROXMOX_NODE", "pve=-node-name")
-VERIFY_SSL = os.getenv("VERIFY_SSL", False)
+VERIFY_SSL = os.getenv("VERIFY_SSL", "false").lower() == "true"
 
 # Options
 # -A <Authn>, --Auth <Authn> -- Authentication type to use:  Authn={ None | Basic | Session (default) }
@@ -1135,12 +1139,18 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
         # Log request details
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+
         try:
             post_data_str = post_data.decode('utf-8')
+            try:
+                payload = json.loads(post_data_str)
+            except json.JSONDecodeError:
+                payload = post_data_str  # Log raw string if not JSON
         except UnicodeDecodeError:
             post_data_str = "<Non-UTF-8 data>"
+            payload = post_data_str
         headers_str = "\n".join(f"{k}: {v}" for k, v in self.headers.items())
-        logger.debug(f"POST Request: path={self.path}, headers=\n{headers_str}\n, body={post_data_str}")
+        logger.debug(f"POST Request: path={self.path}\nHeaders:\n{headers_str}\nPayload:\n{json.dumps(payload, indent=2)}")
 
         path = self.path
         response = {}
@@ -1252,12 +1262,18 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
         # Log request details
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+
         try:
             post_data_str = post_data.decode('utf-8')
+            try:
+                payload = json.loads(post_data_str)
+            except json.JSONDecodeError:
+                payload = post_data_str  # Log raw string if not JSON
         except UnicodeDecodeError:
             post_data_str = "<Non-UTF-8 data>"
+            payload = post_data_str
         headers_str = "\n".join(f"{k}: {v}" for k, v in self.headers.items())
-        logger.debug(f"PATCH Request: path={self.path}, headers=\n{headers_str}\n, body={post_data_str}")
+        logger.debug(f"PATCH Request: path={self.path}\nHeaders:\n{headers_str}\nPayload:\n{json.dumps(payload, indent=2)}")
 
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length)
