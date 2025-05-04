@@ -22,12 +22,12 @@ logging.basicConfig(
 logger = logging.getLogger('redfish-proxmox')
 logger.setLevel(logging.DEBUG)
 
-# Proxmox configuration (replace with your actual values)
-PROXMOX_HOST = "Li-MA-IFCP-PM.pptlabnet.com"
-PROXMOX_USER = "ventura@pve"       # Only required if using --Auth None
-PROXMOX_PASSWORD = "att42924"        # the same here
-PROXMOX_NODE = "Li-MA-IFCP-PM"
-VERIFY_SSL = False
+# Proxmox configuration from environment variables with fallbacks
+PROXMOX_HOST = os.getenv("PROXMOX_HOST", "pve-node-hostname")
+PROXMOX_USER = os.getenv("PROXMOX_USER", "username")
+PROXMOX_PASSWORD = os.getenv("PROXMOX_PASSWORD", "password")
+PROXMOX_NODE = os.getenv("PROXMOX_NODE", "pve=-node-name")
+VERIFY_SSL = os.getenv("VERIFY_SSL", False)
 
 # Options
 # -A <Authn>, --Auth <Authn> -- Authentication type to use:  Authn={ None | Basic | Session (default) }

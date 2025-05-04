@@ -268,6 +268,12 @@ The code covers the following Redfish endpoints and functionalities:
     -   Custom action to update VM configuration.
 8.  **Session Service (/redfish/v1/SessionService/Sessions)**:
     -   Implements session-based authentication when AUTH == "Session".
+9.  **Processors (/redfish/v1/Systems/{vm\_id}/Processors)**:
+    -   Collect processors information
+10.  **Storage (/redfish/v1/Systems/{vm\_id}/Storage)**:
+    -   Collect Storage information
+11.  **Ethernet interfaces (/redfish/v1/Systems/{vm\_id}/EthernetInterfaces)**:
+    -   Collect ethernet information
 
 ### Redfish Endpoints Not Included
 

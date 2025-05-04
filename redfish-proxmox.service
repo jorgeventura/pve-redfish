@@ -3,7 +3,11 @@ Description=Redfish Daemon for Proxmox VM Control
 After=network.target
 
 [Service]
-ExecStart=/opt/redfish_daemon/venv/bin/python /opt/redfish_daemon/redfish-proxmox.py
+Environment="PROXMOX_HOST="
+Environment="PROXMOX_USER="
+Environment="PROXMOX_PASSWORD="
+Environment="PROXMOX_NODE="
+ExecStart=/opt/redfish_daemon/venv/bin/python /opt/redfish_daemon/redfish-proxmox.py -A None
 WorkingDirectory=/opt/redfish_daemon
 Restart=always
 Type=simple
