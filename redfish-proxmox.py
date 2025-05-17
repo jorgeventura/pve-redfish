@@ -1079,6 +1079,13 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                     response = get_vm_status(proxmox, vm_id)
                     if isinstance(response, tuple):
                         response, status_code = response
+                # START NEW CODE: Handle /redfish/v1/Systems/<vm_id>/Bios
+                elif len(parts) == 6 and parts[5] == "Bios":  # /redfish/v1/Systems/<vm_id>/Bios
+                    vm_id = int(parts[4])
+                    response = get_bios(proxmox, vm_id)
+                    if isinstance(response, tuple):
+                        response, status_code = response
+                # END NEW CODE
                 elif len(parts) == 6 and parts[5] == "Processors":  # /redfish/v1/Systems/<vm_id>/Processors
                     vm_id = int(parts[4])
                     response = get_processor_collection(proxmox, vm_id)
@@ -1317,7 +1324,7 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                 self.wfile.write(response_body)
                 logger.debug(f"PATCH Response: path={self.path}, status={status_code}, body={json.dumps(response)}")
                 return
-
+            
             if len(parts) == 6 and parts[5] == "Bios":  # /redfish/v1/Systems/<vm_id>/Bios
                 vm_id = parts[4]
                 try:
