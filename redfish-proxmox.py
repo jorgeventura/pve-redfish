@@ -1399,6 +1399,49 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                 logger.debug(f"Processing boot configuration for VM {vm_id}")
                 try:
                     data = json.loads(post_data.decode('utf-8'))
+                    # START NEW CODE: Handle Sushy's non-standard FirmwareMode request
+                    if "Attributes" in data and "FirmwareMode" in data["Attributes"]:
+                        logger.warning(f"Received non-standard FirmwareMode request at /redfish/v1/Systems/{vm_id}; redirecting to BIOS handling")
+                        mode = data["Attributes"]["FirmwareMode"]
+                        if mode not in ["BIOS", "UEFI"]:
+                            status_code = 400
+                            response = {
+                                "error": {
+                                    "code": "Base.1.0.PropertyValueNotInList",
+                                    "message": f"Invalid FirmwareMode: {mode}"
+                                }
+                            }
+                        else:
+                            # Check if VM is stopped
+                            status = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).status.current.get()
+                            if status["status"] != "stopped":
+                                status_code = 400
+                                response = {
+                                    "error": {
+                                        "code": "Base.1.0.ActionNotSupported",
+                                        "message": f"Cannot modify BIOS settings while VM {vm_id} is {status['status']}.",
+                                        "@Message.ExtendedInfo": [{
+                                            "MessageId": "Base.1.0.ActionNotSupported",
+                                            "Message": "The action to modify BIOS settings is not supported while the system is running or paused. Stop the system and try again.",
+                                            "Severity": "Warning",
+                                            "Resolution": "Stop the system using a Reset action (e.g., ForceOff) and retry the operation."
+                                        }]
+                                    }
+                                }
+                            else:
+                                bios_setting = "seabios" if mode == "BIOS" else "ovmf"
+                                task = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.set(bios=bios_setting)
+                                response = {
+                                    "@odata.id": f"/redfish/v1/TaskService/Tasks/{task}",
+                                    "@odata.type": "#Task.v1_0_0.Task",
+                                    "Id": task,
+                                    "Name": f"Set BIOS Mode for VM {vm_id}",
+                                    "TaskState": "Running",
+                                    "TaskStatus": "OK",
+                                    "Messages": [{"Message": f"Set BIOS mode to {mode} for VM {vm_id}"}]
+                                }
+                                status_code = 202
+                    # END NEW CODE
                     logger.debug(f"Parsed payload: {json.dumps(data, indent=2)}")
                     if "Boot" in data:
                         boot_data = data["Boot"]
