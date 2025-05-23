@@ -1399,19 +1399,22 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                 logger.debug(f"Processing boot configuration for VM {vm_id}")
                 try:
                     data = json.loads(post_data.decode('utf-8'))
-                    # START NEW CODE: Handle Sushy's non-standard FirmwareMode request
-                    if "Attributes" in data and "FirmwareMode" in data["Attributes"]:
-                        logger.warning(f"Received non-standard FirmwareMode request at /redfish/v1/Systems/{vm_id}; redirecting to BIOS handling")
-                        mode = data["Attributes"]["FirmwareMode"]
-                        if mode not in ["BIOS", "UEFI"]:
+                    # START NEW CODE: Handle sushi ironic drive's incorrect BootSourceOverrideMode request
+                    if "Boot" in data and "BootSourceOverrideMode" in data["Boot"]:
+                        logger.warning(f"Received non-standard BootSourceOverrideMode request at /redfish/v1/Systems/{vm_id}; redirecting to BIOS handling")
+                        mode = data["Boot"]["BootSourceOverrideMode"]
+                        # Map BootSourceOverrideMode to FirmwareMode
+                        mode_map = {"UEFI": "UEFI", "Legacy": "BIOS"}
+                        if mode not in mode_map:
                             status_code = 400
                             response = {
                                 "error": {
                                     "code": "Base.1.0.PropertyValueNotInList",
-                                    "message": f"Invalid FirmwareMode: {mode}"
+                                    "message": f"Invalid BootSourceOverrideMode: {mode}"
                                 }
                             }
                         else:
+                            firmware_mode = mode_map[mode]
                             # Check if VM is stopped
                             status = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).status.current.get()
                             if status["status"] != "stopped":
@@ -1420,30 +1423,41 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                                     "error": {
                                         "code": "Base.1.0.ActionNotSupported",
                                         "message": f"Cannot modify BIOS settings while VM {vm_id} is {status['status']}.",
-                                        "@Message.ExtendedInfo": [{
-                                            "MessageId": "Base.1.0.ActionNotSupported",
-                                            "Message": "The action to modify BIOS settings is not supported while the system is running or paused. Stop the system and try again.",
-                                            "Severity": "Warning",
-                                            "Resolution": "Stop the system using a Reset action (e.g., ForceOff) and retry the operation."
-                                        }]
+                                        "@Message.ExtendedInfo": [
+                                            {
+                                                "MessageId": "Base.1.0.ActionNotSupported",
+                                                "Message": "The action to modify BIOS settings is not supported while the system is running or paused. Stop the system and try again.",
+                                                "Severity": "Warning",
+                                                "Resolution": "Stop the system using a Reset action (e.g., ForceOff) and retry the operation."
+                                            }
+                                        ]
                                     }
                                 }
                             else:
-                                bios_setting = "seabios" if mode == "BIOS" else "ovmf"
+                                bios_setting = "seabios" if firmware_mode == "BIOS" else "ovmf"
                                 task = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.set(bios=bios_setting)
                                 response = {
                                     "@odata.id": f"/redfish/v1/TaskService/Tasks/{task}",
                                     "@odata.type": "#Task.v1_0_0.Task",
                                     "Id": task,
                                     "Name": f"Set BIOS Mode for VM {vm_id}",
-                                    "TaskState": "Running",
+                                    "TaskState": "Completed",  # Changed from "Running" to indicate immediate completion
                                     "TaskStatus": "OK",
-                                    "Messages": [{"Message": f"Set BIOS mode to {mode} for VM {vm_id}"}]
+                                    "Messages": [{"Message": f"Set BIOS mode to {firmware_mode} for VM {vm_id}"}]
                                 }
-                                status_code = 202
+                                status_code = 200  # Changed from 202 to 200 for sushi driver
+                                response_body = json.dumps(response).encode('utf-8')
+                                self.send_response(status_code)
+                                self.send_header("Content-Type", "application/json")
+                                self.send_header("Content-Length", str(len(response_body)))
+                                self.send_header("Connection", "close")
+                                self.end_headers()
+                                self.wfile.write(response_body)
+                                logger.debug(f"PATCH Response: path={self.path}, status={status_code}, body={json.dumps(response)}")
+                                return
                     # END NEW CODE
                     logger.debug(f"Parsed payload: {json.dumps(data, indent=2)}")
-                    if "Boot" in data:
+                    elif "Boot" in data:
                         boot_data = data["Boot"]
                         if "BootSourceOverrideMode" in boot_data:
                             status_code = 400
