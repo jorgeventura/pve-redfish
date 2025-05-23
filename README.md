@@ -8,6 +8,12 @@ Before send requests to redfish, a session token must be obtained:
 curl -k -X POST https://pve-node/redfish/v1/SessionService/Sessions -H "Content-Type: application/json" -d '{"UserName": "username", "Password": "password"}'
 ```
 
+If using Basic authentication:
+
+```bash
+curl -k -X GET -u "username:password" https://pve-node/redfish/v1/Systems
+```
+
 The return will be:
 
 ```json

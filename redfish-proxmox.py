@@ -19,7 +19,7 @@ logging_enabled = os.getenv("REDFISH_LOGGING_ENABLED", "true").lower() == "true"
 if logging_enabled:
     logging.basicConfig(
         level=logging.DEBUG,
-        format='%(asctime)s %(levelname)s: %(message)s',
+        format='%(asctime)s %(levelname)s:%(lineno)d: %(message)s',
         handlers=[SysLogHandler(address='/dev/log')]
     )
     logger.setLevel(logging.DEBUG)
@@ -193,6 +193,32 @@ def reboot(proxmox, vm_id):
         }, 202
     except Exception as e:
         return handle_proxmox_error("Reboot", e, vm_id)
+
+
+def reset_vm(proxmox, vm_id):
+    """
+    Perform a hard reset of the Proxmox VM, equivalent to a power cycle.
+    
+    Args:
+        proxmox: ProxmoxAPI instance
+        vm_id: VM ID
+    
+    Returns:
+        Tuple of (response_dict, status_code) for Redfish response
+    """
+    try:
+        task = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).status.reset.post()
+        return {
+            "@odata.id": f"/redfish/v1/TaskService/Tasks/{task}",
+            "@odata.type": "#Task.v1_0_0.Task",
+            "Id": task,
+            "Name": f"Hard Reset VM {vm_id}",
+            "TaskState": "Running",
+            "TaskStatus": "OK",
+            "Messages": [{"Message": f"Hard reset request initiated for VM {vm_id}"}]
+        }, 202
+    except Exception as e:
+        return handle_proxmox_error("Hard Reset", e, vm_id)
 
 
 def suspend_vm(proxmox, vm_id):
@@ -856,6 +882,11 @@ def get_vm_status(proxmox, vm_id):
         status = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).status.current.get()
         config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
 
+        # Determine firmware mode and boot mode
+        firmware_type = config.get("bios", "seabios")
+        firmware_mode = "BIOS" if firmware_type == "seabios" else "UEFI"
+        boot_mode = "Legacy" if firmware_mode == "BIOS" else "UEFI"  # Define boot_mode
+
         # Map Proxmox status to Redfish PowerState and State
         redfish_status = "Off"
         state = "Enabled"  # Default for stopped VMs
@@ -1009,12 +1040,22 @@ def get_vm_status(proxmox, vm_id):
             "Boot": {
                 "BootSourceOverrideEnabled": boot_override_enabled,
                 "BootSourceOverrideTarget": boot_target,
-                "BootSourceOverrideSupported": ["Pxe", "Cd", "Hdd"]
+                "BootSourceOverrideTarget@Redfish.AllowableValues": ["Pxe", "Cd", "Hdd"],
+                "BootSourceOverrideMode": boot_mode,
+                "BootSourceOverrideMode@Redfish.AllowableValues": ["UEFI", "Legacy"]
             },
             "Actions": {
                 "#ComputerSystem.Reset": {
                     "target": f"/redfish/v1/Systems/{vm_id}/Actions/ComputerSystem.Reset",
-                    "ResetType@Redfish.AllowableValues": ["On", "ForceOff", "ForceRestart", "Pause", "Resume", "ForceStop"]
+                    "ResetType@Redfish.AllowableValues": [
+                        "On",
+                        "GracefulShutdown",
+                        "ForceOff",
+                        "GracefulRestart",
+                        "ForceRestart",
+                        "Pause",
+                        "Resume"
+                    ]
                 }
             },
             "Manufacturer": smbios_data["Manufacturer"],
@@ -1233,19 +1274,35 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                         reset_type = data.get("ResetType", "")
                         if reset_type == "On":
                             response, status_code = power_on(proxmox, int(vm_id))
-                        elif reset_type == "ForceOff":
+                        elif reset_type == "GracefulShutdown":
                             response, status_code = power_off(proxmox, int(vm_id))
-                        elif reset_type == "ForceRestart":
+                        elif reset_type == "ForceOff":
+                            response, status_code = stop_vm(proxmox, int(vm_id))
+                        elif reset_type == "GracefulRestart":
                             response, status_code = reboot(proxmox, int(vm_id))
+                        elif reset_type == "ForceRestart":
+                            response, status_code = reset_vm(proxmox, int(vm_id))
                         elif reset_type == "Pause":
                             response, status_code = suspend_vm(proxmox, int(vm_id))
                         elif reset_type == "Resume":
                             response, status_code = resume_vm(proxmox, int(vm_id))
-                        elif reset_type == "ForceStop":
-                            response, status_code = stop_vm(proxmox, int(vm_id))
                         else:
                             status_code = 400
-                            response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Unsupported ResetType: {reset_type}"}}
+                            response = {
+                                "error": {
+                                    "code": "Base.1.0.InvalidRequest",
+                                    "message": f"Unsupported ResetType: {reset_type}",
+                                    "@Message.ExtendedInfo": [
+                                        {
+                                            "MessageId": "Base.1.0.PropertyValueNotInList",
+                                            "Message": f"The value '{reset_type}' for ResetType is not in the supported list: On, GracefulShutdown, ForceOff, GracefulRestart, ForceRestart, Pause, Resume.",
+                                            "MessageArgs": [reset_type],
+                                            "Severity": "Warning",
+                                            "Resolution": "Select a supported ResetType value."
+                                        }
+                                    ]
+                                }
+                            }
                     elif path.startswith("/redfish/v1/Systems/") and "/VirtualMedia/CDROM/Actions/VirtualMedia.InsertMedia" in path:
                         vm_id = path.split("/")[4]
                         iso_path = data.get("Image")
@@ -1342,37 +1399,18 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                                     }
                                 }
                             else:
-                                # Check if VM is stopped
-                                status = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).status.current.get()
-                                if status["status"] != "stopped":
-                                    status_code = 400
-                                    response = {
-                                        "error": {
-                                            "code": "Base.1.0.ActionNotSupported",
-                                            "message": f"Cannot modify BIOS settings while VM {vm_id} is {status['status']}.",
-                                            "@Message.ExtendedInfo": [
-                                                {
-                                                    "MessageId": "Base.1.0.ActionNotSupported",
-                                                    "Message": "The action to modify BIOS settings is not supported while the system is running or paused. Stop the system and try again.",
-                                                    "Severity": "Warning",
-                                                    "Resolution": "Stop the system using a Reset action (e.g., ForceOff) and retry the operation."
-                                                }
-                                            ]
-                                        }
-                                    }
-                                else:
-                                    bios_setting = "seabios" if mode == "BIOS" else "ovmf"
-                                    task = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.set(bios=bios_setting)
-                                    response = {
-                                        "@odata.id": f"/redfish/v1/TaskService/Tasks/{task}",
-                                        "@odata.type": "#Task.v1_0_0.Task",
-                                        "Id": task,
-                                        "Name": f"Set BIOS Mode for VM {vm_id}",
-                                        "TaskState": "Running",
-                                        "TaskStatus": "OK",
-                                        "Messages": [{"Message": f"Set BIOS mode to {mode} for VM {vm_id}"}]
-                                    }
-                                    status_code = 202
+                                bios_setting = "seabios" if mode == "BIOS" else "ovmf"
+                                task = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.set(bios=bios_setting)
+                                response = {
+                                    "@odata.id": f"/redfish/v1/TaskService/Tasks/{task}",
+                                    "@odata.type": "#Task.v1_0_0.Task",
+                                    "Id": task,
+                                    "Name": f"Set BIOS Mode for VM {vm_id}",
+                                    "TaskState": "Running",
+                                    "TaskStatus": "OK",
+                                    "Messages": [{"Message": f"Set BIOS mode to {mode} for VM {vm_id}"}]
+                                }
+                                status_code = 202
                         else:
                             status_code = 400
                             response = {
@@ -1399,7 +1437,8 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                 logger.debug(f"Processing boot configuration for VM {vm_id}")
                 try:
                     data = json.loads(post_data.decode('utf-8'))
-                    # START NEW CODE: Handle sushi ironic drive's incorrect BootSourceOverrideMode request
+                    logger.debug(f"Parsed payload: {json.dumps(data, indent=2)}")
+                    # START NEW CODE: Handle sushy ironic drive's incorrect BootSourceOverrideMode request
                     if "Boot" in data and "BootSourceOverrideMode" in data["Boot"]:
                         logger.warning(f"Received non-standard BootSourceOverrideMode request at /redfish/v1/Systems/{vm_id}; redirecting to BIOS handling")
                         mode = data["Boot"]["BootSourceOverrideMode"]
@@ -1415,49 +1454,29 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                             }
                         else:
                             firmware_mode = mode_map[mode]
-                            # Check if VM is stopped
-                            status = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).status.current.get()
-                            if status["status"] != "stopped":
-                                status_code = 400
-                                response = {
-                                    "error": {
-                                        "code": "Base.1.0.ActionNotSupported",
-                                        "message": f"Cannot modify BIOS settings while VM {vm_id} is {status['status']}.",
-                                        "@Message.ExtendedInfo": [
-                                            {
-                                                "MessageId": "Base.1.0.ActionNotSupported",
-                                                "Message": "The action to modify BIOS settings is not supported while the system is running or paused. Stop the system and try again.",
-                                                "Severity": "Warning",
-                                                "Resolution": "Stop the system using a Reset action (e.g., ForceOff) and retry the operation."
-                                            }
-                                        ]
-                                    }
-                                }
-                            else:
-                                bios_setting = "seabios" if firmware_mode == "BIOS" else "ovmf"
-                                task = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.set(bios=bios_setting)
-                                response = {
-                                    "@odata.id": f"/redfish/v1/TaskService/Tasks/{task}",
-                                    "@odata.type": "#Task.v1_0_0.Task",
-                                    "Id": task,
-                                    "Name": f"Set BIOS Mode for VM {vm_id}",
-                                    "TaskState": "Completed",  # Changed from "Running" to indicate immediate completion
-                                    "TaskStatus": "OK",
-                                    "Messages": [{"Message": f"Set BIOS mode to {firmware_mode} for VM {vm_id}"}]
-                                }
-                                status_code = 200  # Changed from 202 to 200 for sushi driver
-                                response_body = json.dumps(response).encode('utf-8')
-                                self.send_response(status_code)
-                                self.send_header("Content-Type", "application/json")
-                                self.send_header("Content-Length", str(len(response_body)))
-                                self.send_header("Connection", "close")
-                                self.end_headers()
-                                self.wfile.write(response_body)
-                                logger.debug(f"PATCH Response: path={self.path}, status={status_code}, body={json.dumps(response)}")
-                                return
+                            bios_setting = "seabios" if firmware_mode == "BIOS" else "ovmf"
+                            task = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.set(bios=bios_setting)
+                            response = {
+                                "@odata.id": f"/redfish/v1/TaskService/Tasks/{task}",
+                                "@odata.type": "#Task.v1_0_0.Task",
+                                "Id": task,
+                                "Name": f"Set BIOS Mode for VM {vm_id}",
+                                "TaskState": "Completed",  # Changed from "Running" to indicate immediate completion
+                                "TaskStatus": "OK",
+                                "Messages": [{"Message": f"Set BIOS mode to {firmware_mode} for VM {vm_id}"}]
+                            }
+                            status_code = 200  # Changed from 202 to 200 for sushi driver
+                            response_body = json.dumps(response).encode('utf-8')
+                            self.send_response(status_code)
+                            self.send_header("Content-Type", "application/json")
+                            self.send_header("Content-Length", str(len(response_body)))
+                            self.send_header("Connection", "close")
+                            self.end_headers()
+                            self.wfile.write(response_body)
+                            logger.debug(f"PATCH Response: path={self.path}, status={status_code}, body={json.dumps(response)}")
+                            return
                     # END NEW CODE
-                    logger.debug(f"Parsed payload: {json.dumps(data, indent=2)}")
-                    elif "Boot" in data:
+                    if "Boot" in data:
                         boot_data = data["Boot"]
                         if "BootSourceOverrideMode" in boot_data:
                             status_code = 400
@@ -1516,86 +1535,66 @@ class RedfishRequestHandler(BaseHTTPRequestHandler):
                                         ]
                                     }
                                 }
-                            else:
-                                # Check the VM's current power state
-                                logger.debug(f"Checking power state for VM {vm_id}")
-                                try:
-                                    status = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).status.current.get()
-                                    logger.debug(f"VM {vm_id} status: {status['status']}")
-                                except Exception as e:
-                                    logger.error(f"Failed to get VM {vm_id} status: {str(e)}")
-                                    status_code = 500
-                                    response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Failed to get VM status: {str(e)}"}}
+                            # Check the VM's current power state
+                            logger.debug(f"Checking power state for VM {vm_id}")
+                            try:
+                                status = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).status.current.get()
+                                logger.debug(f"VM {vm_id} status: {status['status']}")
+                            except Exception as e:
+                                logger.error(f"Failed to get VM {vm_id} status: {str(e)}")
+                                status_code = 500
+                                response = {"error": {"code": "Base.1.0.GeneralError", "message": f"Failed to get VM status: {str(e)}"}}
 
-                                redfish_status = {
-                                    "running": "On",
-                                    "stopped": "Off",
-                                    "paused": "Paused",
-                                    "shutdown": "Off"
-                                }.get(status["status"], "Unknown")
-                                logger.debug(f"VM {vm_id} redfish_status: {redfish_status}")
+                            redfish_status = {
+                                "running": "On",
+                                "stopped": "Off",
+                                "paused": "Paused",
+                                "shutdown": "Off"
+                            }.get(status["status"], "Unknown")
+                            logger.debug(f"VM {vm_id} redfish_status: {redfish_status}")
 
-                                if redfish_status != "Off":
-                                    logger.error(f"Cannot modify boot configuration for VM {vm_id}: VM is {redfish_status}")
-                                    status_code = 400
-                                    response = {
-                                        "error": {
-                                            "code": "Base.1.0.ActionNotSupported",
-                                            "message": f"Cannot modify boot configuration while VM {vm_id} is {redfish_status}. BootSourceOverrideEnabled is Disabled.",
-                                            "@Message.ExtendedInfo": [
-                                                {
-                                                    "MessageId": "Base.1.0.ActionNotSupported",
-                                                    "Message": "The action to modify the boot order is not supported while the system is powered on or in a paused state. Power off the system and try again.",
-                                                    "MessageArgs": ["Boot order modification", redfish_status],
-                                                    "Severity": "Warning",
-                                                    "Resolution": "Power off the system using a Reset action (e.g., ForceOff) and retry the operation."
-                                                }
-                                            ]
-                                        }
-                                    }
-                                else:
-                                    # Proceed with boot order change
-                                    logger.debug(f"VM {vm_id} is Off, proceeding with boot order change to {target}")
-                                    try:
-                                        config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
-                                        current_boot = config.get("boot", "")
-                                        logger.debug(f"Current boot order: {current_boot}")
-                                        new_boot_order = reorder_boot_order(proxmox, int(vm_id), current_boot, target)
-                                        logger.debug(f"New boot order: {new_boot_order}")
-                                        config_data = {"boot": f"order={new_boot_order}" if new_boot_order else ""}
-                                        task = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.set(**config_data)
-                                        logger.debug(f"Boot order update task initiated: {task}")
-                                        response = {
-                                            "@odata.id": f"/redfish/v1/TaskService/Tasks/{task}",
-                                            "@odata.type": "#Task.v1_0_0.Task",
-                                            "Id": task,
-                                            "Name": f"Set Boot Order for VM {vm_id}",
-                                            "TaskState": "Running",
-                                            "TaskStatus": "OK",
-                                            "Messages": [{"Message": f"Boot order set to {target} ({new_boot_order}) for VM {vm_id}"}]
-                                        }
-                                        status_code = 202
-                                    except ValueError as e:
-                                        logger.error(f"Failed to set boot order for VM {vm_id}: {str(e)}")
-                                        status_code = 400
-                                        response = {
-                                            "error": {
-                                                "code": "Base.1.0.ActionNotSupported",
-                                                "message": f"Cannot set BootSourceOverrideTarget to {target}: {str(e)}",
-                                                "@Message.ExtendedInfo": [
-                                                    {
-                                                        "MessageId": "Base.1.0.ActionNotSupported",
-                                                        "Message": f"The requested boot device '{target}' is not available. Available boot devices are: Pxe, Cd.",
-                                                        "MessageArgs": [target],
-                                                        "Severity": "Warning",
-                                                        "Resolution": "Select a supported boot device from BootSourceOverrideSupported or verify the VM configuration."
-                                                    }
-                                                ]
+                            # Proceed with boot order change
+                            logger.debug(f"VM {vm_id}, proceeding with boot order change to {target}")
+                            try:
+                                config = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.get()
+                                current_boot = config.get("boot", "")
+                                logger.debug(f"Current boot order: {current_boot}")
+                                new_boot_order = reorder_boot_order(proxmox, int(vm_id), current_boot, target)
+                                logger.debug(f"New boot order: {new_boot_order}")
+                                config_data = {"boot": f"order={new_boot_order}" if new_boot_order else ""}
+                                task = proxmox.nodes(PROXMOX_NODE).qemu(vm_id).config.set(**config_data)
+                                logger.debug(f"Boot order update task initiated: {task}")
+                                response = {
+                                    "@odata.id": f"/redfish/v1/TaskService/Tasks/{task}",
+                                    "@odata.type": "#Task.v1_0_0.Task",
+                                    "Id": task,
+                                    "Name": f"Set Boot Order for VM {vm_id}",
+                                    "TaskState": "Running",
+                                    "TaskStatus": "OK",
+                                    "Messages": [{"Message": f"Boot order set to {target} ({new_boot_order}) for VM {vm_id}"}]
+                                }
+                                status_code = 202
+                            except ValueError as e:
+                                logger.error(f"Failed to set boot order for VM {vm_id}: {str(e)}")
+                                status_code = 400
+                                response = {
+                                    "error": {
+                                        "code": "Base.1.0.ActionNotSupported",
+                                        "message": f"Cannot set BootSourceOverrideTarget to {target}: {str(e)}",
+                                        "@Message.ExtendedInfo": [
+                                            {
+                                                "MessageId": "Base.1.0.ActionNotSupported",
+                                                "Message": f"The requested boot device '{target}' is not available. Available boot devices are: Pxe, Cd.",
+                                                "MessageArgs": [target],
+                                                "Severity": "Warning",
+                                                "Resolution": "Select a supported boot device from BootSourceOverrideSupported or verify the VM configuration."
                                             }
-                                        }
-                                    except Exception as e:
-                                        logger.error(f"Failed to set boot order for VM {vm_id}: {str(e)}")
-                                        response, status_code = handle_proxmox_error("Boot configuration", e, vm_id)
+                                        ]
+                                    }
+                                }
+                            except Exception as e:
+                                logger.error(f"Failed to set boot order for VM {vm_id}: {str(e)}")
+                                response, status_code = handle_proxmox_error("Boot configuration", e, vm_id)
                     else:
                         logger.error("Boot object required in PATCH request")
                         status_code = 400
